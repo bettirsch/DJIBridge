@@ -16,11 +16,11 @@ A teljes pipeline jellemzően így néz ki:
 
 ```mermaid
 flowchart LR
-  A[DJI drón kamera] --> B[DJI Mobile SDK (Android)]
-  B --> C[DJICodecManager / Frame callback]
-  C --> D[DJIBridge AAR]
-  D --> E[Unity Android plugin (JNI/AndroidJavaObject)]
-  E --> F[Unity: videó texture + AR overlay]
+  A["DJI drón kamera"] --> B["DJI Mobile SDK (Android)"]
+  B --> C["DJICodecManager / Frame callback"]
+  C --> D["DJIBridge AAR"]
+  D --> E["Unity Android plugin (JNI/AndroidJavaObject)"]
+  E --> F["Unity: videó texture + AR overlay"]
 ```
 
 **DJIBridge** felel azért, hogy:
