@@ -9,15 +9,6 @@ import dji.v5.manager.interfaces.ICameraStreamManager
 /**
  * Public Unity-facing API (kept as an object for easy JNI/Unity calls),
  * internally delegating responsibilities to smaller classes.
- *
- * You can split these classes into separate files later:
- * - DJIUnityVideoBridge (API)
- * - UnityVideoBridgeController (orchestrator)
- * - CameraStreamClient
- * - DecodeExecutor
- * - DecoderPipeline (codec + pts + csd)
- * - CsdStore + NalUnitParser
- * - PtsGenerator
  */
 object DJIUnityVideoBridge {
 

@@ -34,25 +34,23 @@ class CameraStreamClient(
 
         log.i("CameraStreamClient.start component=$component session=$sessionId")
 
-        val l = object : ReceiveStreamListener {
-            override fun onReceiveStream(data: ByteArray, offset: Int, length: Int, info: StreamInfo) {
-                bytesIn += length.toLong()
-                framesIn++
+        val l = ReceiveStreamListener { data, offset, length, info ->
+            bytesIn += length.toLong()
+            framesIn++
 
-                log.iEvery("rx_$sessionId", 1000L) {
-                    val dtMs = (SystemClock.elapsedRealtime() - startMs).coerceAtLeast(1L)
-                    val kbps = (bytesIn * 8.0) / dtMs // kilobits per ms (good enough for trend)
-                    "RX session=$sessionId frames=$framesIn bytes=$bytesIn (~${"%.2f".format(kbps)} kb/ms) " +
-                            "off=$offset len=$length ${safeInfo(info)}"
-                }
-
-                // Copy out bytes since DJI buffer can be reused.
-                val frame = ByteArray(length)
-                System.arraycopy(data, offset, frame, 0, length)
-
-                val pkt = Packet.from(frame, info)
-                onPacket(pkt)
+            log.iEvery("rx_$sessionId", 1000L) {
+                val dtMs = (SystemClock.elapsedRealtime() - startMs).coerceAtLeast(1L)
+                val kbps = (bytesIn * 8.0) / dtMs // kilobits per ms (good enough for trend)
+                "RX session=$sessionId frames=$framesIn bytes=$bytesIn (~${"%.2f".format(kbps)} kb/ms) " +
+                        "off=$offset len=$length ${safeInfo(info)}"
             }
+
+            // Copy out bytes since DJI buffer can be reused.
+            val frame = ByteArray(length)
+            System.arraycopy(data, offset, frame, 0, length)
+
+            val pkt = Packet.from(frame, info)
+            onPacket(pkt)
         }
 
         listener = l

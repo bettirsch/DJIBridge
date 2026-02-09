@@ -8,7 +8,6 @@ import com.sok9hu.djibridge.initMobileSDK.globalViewModels
 /**
  * Plugin initializer that starts the DJI Mobile SDK once in the application.
  */
-
 object DJIPlugin {
     private var initialized = false
     private lateinit var app: Application

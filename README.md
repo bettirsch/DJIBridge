@@ -51,21 +51,26 @@ flowchart LR
 - `com.android.library` plugin
 - `android { ... }`
 
-3) Build AAR:
+3) Add hozzá a saját generált DJI API key-t az AndroidManifest.xml-hez az <application>-ön belül:
+```xml 
+<meta-data
+   android:name="com.dji.sdk.API_KEY"
+   android:value="your key" />
+```
+
+4) Build AAR:
 
 **macOS/Linux**
 ```bash
-./gradlew :app:assembleRelease
+./gradlew :assembleRelease
 ```
 
 **Windows**
 ```bat
-gradlew.bat :app:assembleRelease
+gradlew.bat :assembleRelease
 ```
 
-> Ha a modul neve nem `app`, cseréld ki a megfelelőre (pl. `:bridge:assembleRelease`).
-
-4) Kimenet (tipikusan):
+5) Kimenet (tipikusan):
 ```text
 app/build/outputs/aar/
   app-release.aar
