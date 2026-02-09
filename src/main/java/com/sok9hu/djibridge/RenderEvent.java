@@ -5,6 +5,10 @@ import android.view.Surface;
 
 import kotlin.jvm.JvmStatic;
 
+/**
+ * Bridge class that creates an Android {@link Surface} from a Unity texture
+ * for DJI video decoder rendering.
+ */
 public class RenderEvent {
     private static SurfaceTexture st;
     private static Surface surface;

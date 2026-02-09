@@ -5,9 +5,10 @@ import android.view.Surface
 import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.v5.manager.interfaces.ICameraStreamManager
 
-/* =========================
- * Orchestrator (high-level)
- * ========================= */
+/**
+ * High-level orchestrator that connects the stream client, decode thread,
+ * and decoding pipeline.
+ */
 class UnityVideoBridgeController(
     private val tag: String,
     private val streamManagerProvider: () -> ICameraStreamManager?

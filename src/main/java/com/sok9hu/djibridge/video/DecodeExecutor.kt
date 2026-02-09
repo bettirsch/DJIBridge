@@ -5,9 +5,9 @@ import android.os.HandlerThread
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/* =========================
- * Decode thread utility
- * ========================= */
+/**
+ * Helper that runs decoding on a single dedicated thread and shuts it down safely.
+ */
 class DecodeExecutor(threadName: String) {
     private val thread = HandlerThread(threadName).also { it.start() }
     private val handler = Handler(thread.looper)

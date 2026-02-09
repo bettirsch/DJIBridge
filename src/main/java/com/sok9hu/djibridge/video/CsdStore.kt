@@ -4,9 +4,9 @@ import android.media.MediaFormat
 import dji.v5.manager.interfaces.ICameraStreamManager.MimeType
 import java.nio.ByteBuffer
 
-/* =========================
- * CSD (SPS/PPS/VPS) store + extraction
- * ========================= */
+/**
+ * Codec-specific data (SPS/PPS/VPS) store and extractor from incoming packets.
+ */
 class CsdStore {
     // H264: csd-0=SPS, csd-1=PPS
     // H265: csd-0=VPS, csd-1=SPS, csd-2=PPS

@@ -10,6 +10,9 @@ import dji.v5.manager.SDKManager
 import dji.v5.manager.interfaces.SDKManagerCallback
 import dji.v5.network.DJINetworkManager
 
+/**
+ * ViewModel for handling DJI Mobile SDK initialization, registration, and connection states.
+ */
 class MSDKManagerVM : ViewModel() {
 
     private val TAG = "MSDKManagerVM"

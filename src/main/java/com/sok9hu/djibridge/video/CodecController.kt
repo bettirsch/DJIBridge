@@ -6,9 +6,9 @@ import android.view.Surface
 import com.sok9hu.djibridge.PipelineLog
 import dji.v5.manager.interfaces.ICameraStreamManager.MimeType
 
-/* =========================
- * Codec controller (fixed render logic + minSdk-friendly flags + avoids return-type inference issues)
- * ========================= */
+/**
+ * Component responsible for MediaCodec lifecycle and frame input/output handling.
+ */
 class CodecController(
     private val tag: String,
     private val surfaceState: SurfaceState

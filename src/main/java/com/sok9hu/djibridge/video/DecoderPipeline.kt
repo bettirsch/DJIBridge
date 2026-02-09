@@ -2,6 +2,10 @@ package com.sok9hu.djibridge.video
 
 import com.sok9hu.djibridge.PipelineLog
 
+/**
+ * Decoding pipeline that collects CSD from packets, configures the codec,
+ * and drives the decode process.
+ */
 class DecoderPipeline(
     private val tag: String,
     private val surfaceState: SurfaceState

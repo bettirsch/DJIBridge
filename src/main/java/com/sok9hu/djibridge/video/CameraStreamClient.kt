@@ -7,6 +7,9 @@ import dji.v5.manager.datacenter.camera.StreamInfo
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.v5.manager.interfaces.ICameraStreamManager.ReceiveStreamListener
 
+/**
+ * DJI camera stream listener client that converts incoming bytes into Packet objects.
+ */
 class CameraStreamClient(
     private val tag: String,
     private val manager: ICameraStreamManager,

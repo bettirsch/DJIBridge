@@ -2,9 +2,9 @@ package com.sok9hu.djibridge.video
 
 import kotlin.math.max
 
-/* =========================
- * Monotonic PTS
- * ========================= */
+/**
+ * Helper class that generates monotonically increasing PTS values.
+ */
 class PtsGenerator {
     var fpsHint: Int = 30
     private var lastPtsUs: Long = 0L

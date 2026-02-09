@@ -3,10 +3,9 @@ package com.sok9hu.djibridge.video
 import dji.v5.manager.datacenter.camera.StreamInfo
 import dji.v5.manager.interfaces.ICameraStreamManager.MimeType
 
-
-/* =========================
- * Packet mapping + model
- * ========================= */
+/**
+ * Unified video packet model for transferring stream frame data and metadata.
+ */
 data class Packet(
     val bytes: ByteArray,
     val ptsUs: Long,

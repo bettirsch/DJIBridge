@@ -1,8 +1,8 @@
 package com.sok9hu.djibridge.video
 
-/* =========================
- * NAL parsing (Annex-B + AVCC)
- * ========================= */
+/**
+ * NAL unit parser for Annex-B and AVCC formatted video frames.
+ */
 object NalUnitParser {
 
     fun forEachNal(

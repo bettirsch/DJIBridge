@@ -4,6 +4,10 @@ import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Lightweight logging wrapper that supports throttling repeated messages
+ * by key.
+ */
 internal class PipelineLog(private val tag: String) {
     private val lastAt = ConcurrentHashMap<String, Long>()
     private val onceSet = ConcurrentHashMap.newKeySet<String>()

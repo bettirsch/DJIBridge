@@ -2,9 +2,9 @@ package com.sok9hu.djibridge.video
 
 import android.view.Surface
 
-/* =========================
- * Surface state
- * ========================= */
+/**
+ * Thread-safe surface state holder with the latest surface and size values.
+ */
 class SurfaceState {
     @Volatile private var surface: Surface? = null
     @Volatile private var width: Int = 0
@@ -25,6 +25,9 @@ class SurfaceState {
     }
 }
 
+/**
+ * Snapshot of surface state used for validation and fallback resolution.
+ */
 data class SurfaceSnapshot(
     val surface: Surface?,
     val width: Int,
