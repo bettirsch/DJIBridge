@@ -25,6 +25,8 @@ class MSDKManagerVM : ViewModel() {
     var isInit = false
 
     fun initMobileSDK(appContext: Context) {
+        Log.i(TAG, "initMobileSDK() called")
+
         // Initialize and set the sdk callback, which is held internally by the sdk until destroy() is called
         SDKManager.getInstance().init(appContext, object : SDKManagerCallback {
             override fun onRegisterSuccess() {
@@ -33,7 +35,7 @@ class MSDKManagerVM : ViewModel() {
             }
 
             override fun onRegisterFailure(error: IDJIError) {
-                Log.i(TAG, "sok9hu - onRegisterFailure")
+                Log.i(TAG, "sok9hu - onRegisterFailure: ${error.description()}")
                 lvRegisterState.postValue(Pair(false, error))
             }
 
@@ -53,11 +55,12 @@ class MSDKManagerVM : ViewModel() {
             }
 
             override fun onInitProcess(event: DJISDKInitEvent, totalProcess: Int) {
-                Log.i(TAG, "sok9hu - onInitProcess")
+                Log.i(TAG, "sok9hu - onInitProcess event=$event total=$totalProcess")
                 lvInitProcess.postValue(Pair(event, totalProcess))
                 // Don't forget to call the registerApp()
                 if (event == DJISDKInitEvent.INITIALIZE_COMPLETE) {
                     isInit = true
+                    Log.i(TAG, "sok9hu - INITIALIZE_COMPLETE -> registerApp()")
                     SDKManager.getInstance().registerApp()
                 }
             }
@@ -69,6 +72,7 @@ class MSDKManagerVM : ViewModel() {
         })
 
         DJINetworkManager.getInstance().addNetworkStatusListener { isAvailable ->
+            Log.i(TAG, "sok9hu - network available=$isAvailable isInit=$isInit registered=${SDKManager.getInstance().isRegistered}")
             if (isInit && isAvailable && !SDKManager.getInstance().isRegistered) {
                 Log.i(TAG, "sok9hu - registerApp start")
                 SDKManager.getInstance().registerApp()

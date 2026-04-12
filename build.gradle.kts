@@ -1,4 +1,19 @@
 import org.gradle.api.tasks.bundling.Zip
+import java.util.Properties
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use(::load)
+    }
+}
+
+val djiApiKey = providers.gradleProperty("DJI_API_KEY").orNull
+    ?: System.getenv("DJI_API_KEY")
+    ?: localProperties.getProperty("DJI_API_KEY")
+    ?: throw GradleException(
+        "Missing DJI_API_KEY. Set it in DJIBridge/local.properties, pass -PDJI_API_KEY=..., or define the DJI_API_KEY environment variable."
+    )
 
 plugins {
     alias(libs.plugins.android.library)
@@ -13,6 +28,7 @@ android {
         minSdk = 24
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resourceConfigurations += listOf("en", "hu")
+        manifestPlaceholders["DJI_API_KEY"] = djiApiKey
     }
 
     lint {

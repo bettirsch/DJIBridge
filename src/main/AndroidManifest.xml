@@ -1,9 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-feature
+        android:name="android.hardware.usb.accessory"
+        android:required="false" />
+
     <application>
         <!-- DJI SDK API key -->
         <meta-data
             android:name="com.dji.sdk.API_KEY"
-            android:value="your key" />
+            android:value="${DJI_API_KEY}" />
+
+        <activity
+            android:name="com.unity3d.player.UnityPlayerGameActivity"
+            tools:node="merge">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/dji_accessory_filter" />
+        </activity>
     </application>
 </manifest>

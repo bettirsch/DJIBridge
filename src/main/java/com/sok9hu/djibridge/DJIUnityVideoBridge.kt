@@ -16,11 +16,31 @@ object DJIUnityVideoBridge {
 
     private val controller by lazy { UnityVideoBridgeController(TAG, ::cameraStreamManager) }
 
+    private data class PendingSurface(
+        val surface: Surface,
+        val width: Int,
+        val height: Int
+    )
+
+    @Volatile
+    private var pendingSurface: PendingSurface? = null
+
     private fun cameraStreamManager(): ICameraStreamManager? =
         MediaDataCenter.getInstance().cameraStreamManager
 
     private fun updateDecoderSurface(surface: Surface, width: Int, height: Int, caller: String) {
         Log.i(TAG, " - $caller called")
+
+        if (!DJIPlugin.isVideoBridgeReady()) {
+            pendingSurface = PendingSurface(surface, width, height)
+            Log.i(
+                TAG,
+                "Deferring $caller until DJI SDK is ready (${DJIPlugin.describeState()})"
+            )
+            return
+        }
+
+        pendingSurface = null
         controller.startOrUpdate(surface, width, height)
     }
 
@@ -38,9 +58,20 @@ object DJIUnityVideoBridge {
         updateDecoderSurface(surface, width, height, "startOrUpdate")
     }
 
+    internal fun onSdkReadyChanged(source: String) {
+        val pending = pendingSurface ?: run {
+            Log.i(TAG, "SDK ready via $source, but no deferred surface is waiting")
+            return
+        }
+
+        Log.i(TAG, "SDK ready via $source; retrying deferred decoder surface")
+        updateDecoderSurface(pending.surface, pending.width, pending.height, "deferredStart")
+    }
+
     @JvmStatic
     fun stopVideo() {
         Log.i(TAG, " - stopVideo called")
+        pendingSurface = null
         controller.stop()
     }
 }

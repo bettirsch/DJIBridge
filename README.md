@@ -1,224 +1,158 @@
 # DJIBridge
 
-Android (Kotlin) bridge library **AAR-ként** Unity-hoz: a **DJI Mobile SDK** élő videó feed-jét (és opcionálisan telemetriát) kiteszi egy Unity-ből hívható Android plugin API-n keresztül.
+Android Kotlin bridge library built as an AAR for the Unity app. It integrates the DJI Mobile SDK, receives the live video stream, and exposes a Unity-callable Android plugin API.
 
-> Használat nálam: ezt a projektet **.aar**-ként build-elem, majd az AAR-t bemásolom ide:
->
-> `DJIUnity/Assets/Plugins/Android/`
->
-> …és a későbbi `DJIUnity` Unity applikáció innen veszi fel dependency-ként.
+The usual workflow is:
+
+- build `DJIBridge` as an AAR
+- copy the AAR into `DJIUnity/Assets/Plugins/Android/`
+- rebuild the Unity Android app
 
 ---
 
-## Mi ez, és hova illeszkedik?
-
-A teljes pipeline jellemzően így néz ki:
+## Role In The System
 
 ```mermaid
 flowchart LR
-  A["DJI drón kamera"] --> B["DJI Mobile SDK (Android)"]
-  B --> C["DJICodecManager / Frame callback"]
-  C --> D["DJIBridge AAR"]
-  D --> E["Unity Android plugin (JNI/AndroidJavaObject)"]
-  E --> F["Unity: videó texture + AR overlay"]
+  A["DJI camera feed"] --> B["DJI Mobile SDK (Android)"]
+  B --> C["DJIBridge AAR"]
+  C --> D["Unity Android plugin calls"]
+  D --> E["DJIUnity app render path"]
 ```
 
-**DJIBridge** felel azért, hogy:
-- a DJI SDK-ból érkező **live video** adatfolyamot fogadja,
-- (tipikusan) **dekódolja** és frame-eket állítson elő,
-- a frame-eket egy Unity által hívható (JNI) felületre tegye ki.
+`DJIBridge` is responsible for:
+
+- initializing and registering the DJI Mobile SDK
+- connecting the decoded video pipeline to a `Surface`
+- exposing Unity-facing entry points through static Android/Kotlin APIs
 
 ---
 
-## Követelmények
+## Requirements
 
-### Fejlesztői környezet
 - Android Studio / Gradle
-- Android SDK + megfelelő build tools
-- (Opcionális) NDK, ha van natív (C/C++) rész
-
-### DJI oldal
-- DJI fejlesztői fiók + **API key** (Mobile SDK aktiváláshoz)
-- DJI Mobile SDK (MSDK) hozzáadva a projekthez (Gradle dependency vagy lokális AAR-ok)
+- Android SDK
+- DJI developer account
+- DJI Mobile SDK dependencies available to Gradle
 
 ---
 
-## Gyors start (AAR build)
+## DJI API Key Setup
 
-1) **Nyisd meg** a projektet Android Studio-ban.
+Do not hardcode the DJI API key in source files.
 
-2) Ellenőrizd, hogy a modul **Android Library**:
-- `com.android.library` plugin
-- `android { ... }`
+The project now reads the key from one of these locations:
 
-3) Add hozzá a saját generált DJI API key-t az AndroidManifest.xml-hez az <application>-ön belül:
-```xml 
-<meta-data
-   android:name="com.dji.sdk.API_KEY"
-   android:value="your key" />
+1. `DJIBridge/local.properties`
+2. Gradle property: `-PDJI_API_KEY=...`
+3. Environment variable: `DJI_API_KEY`
+
+Recommended local setup:
+
+1. Copy `local.properties.example` to `local.properties` if needed.
+2. Add your SDK path and DJI key there.
+
+Example:
+
+```properties
+sdk.dir=C\:\\Users\\you\\AppData\\Local\\Android\\Sdk
+DJI_API_KEY=your-dji-api-key
 ```
 
-4) Build AAR:
+Important:
 
-**macOS/Linux**
-```bash
-./gradlew :assembleRelease
-```
+- `local.properties` is gitignored
+- `local.properties.example` is safe to commit
+- the Android manifest receives the key through a Gradle manifest placeholder
 
-**Windows**
+If the key was ever committed previously, treat it as exposed and rotate it in the DJI developer portal.
+
+---
+
+## Build
+
+Open the project in Android Studio or build with Gradle.
+
+Windows:
+
 ```bat
-gradlew.bat :assembleRelease
+gradlew.bat assembleRelease
 ```
 
-5) Kimenet (tipikusan):
-```text
-app/build/outputs/aar/
-  app-release.aar
+macOS/Linux:
+
+```bash
+./gradlew assembleRelease
 ```
 
----
-
-## Unity integráció
-
-### 1) AAR bemásolása
-Másold be a buildelt AAR-t ide:
+Output:
 
 ```text
-DJIUnity/Assets/Plugins/Android/
-  DJIBridge.aar   (vagy app-release.aar átnevezve)
-```
-
-Unity-ben:
-- Jelöld ki az AAR assetet
-- Inspector → **Select platforms for plugin** → Android bepipál
-- Apply
-
-> Unity dokumentáció (Unity 6): AAR plug-in import és működés  
-> https://docs.unity3d.com/6000.3/Documentation/Manual/android-aar-import.html
-
-### 2) Transitive dependency-k (fontos!)
-A Unity általában **nem kezeli automatikusan** úgy a transitive dependency-ket, mint egy tiszta Android Studio projekt.
-Ha az AAR **nem “fat AAR”**, és külön DJI/AndroidX/egyéb libek kellenek, két tipikus megoldás van:
-
-**A) Unity Gradle template-ben felvenni a dependency-ket**
-Unity 6: Gradle template-ek:  
-https://docs.unity3d.com/6000.3/Documentation/Manual/gradle-templates.html
-
-- Project Settings → Player → Android → Publishing Settings
-- Pipáld be:
-  - Custom Main Gradle Template
-  - Custom Launcher Gradle Template
-  - (ha kell) Custom Gradle Properties Template
-
-Majd a `Assets/Plugins/Android/mainTemplate.gradle` / `launcherTemplate.gradle` fájlokban vedd fel a szükséges `repositories {}` és `dependencies {}` blokkokat.
-
-**B) External Dependency Manager (EDM4U)**
-Ha szeretnél Maven dependency-ket “Unity-kompatibilisen” kezelni, sokan EDM4U-val oldják meg.
-
----
-
-## Android permissionök & manifest
-
-A DJI SDK általában több permissiont igényel (network, wifi state, location, storage, stb.). Példa-lista és minta manifest a DJI dokumentációban:  
-https://developer.dji.com/doc/mobile-sdk-tutorial/en/quick-start/run-sample.html
-
-**Android 6+ (API 23+)** esetén a runtime permission kérést is kezelned kell (Unity Activity-ből vagy a pluginból).
-
----
-
-## Tipikus Unity oldali hívás (példa)
-
-> A konkrét class/package/method neveket igazítsd a DJIBridge implementációdhoz.  
-> A minta csak a “hogyan hívd JNI-n át” sémát mutatja.
-
-```csharp
-using UnityEngine;
-
-public class DJIBridgeClient : MonoBehaviour
-{
-    AndroidJavaObject _activity;
-    AndroidJavaObject _bridge;
-
-    void Start()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-        var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
-        _activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
-
-        // TODO: cseréld ki a saját fully-qualified class nevedre
-        _bridge = new AndroidJavaObject("com.yourcompany.djibridge.DJIBridge");
-
-        // Tipikus init
-        _bridge.Call("initialize", _activity);
-        _bridge.Call("registerSdk");      // DJI SDK regisztráció + aktiválás
-        _bridge.Call("startVideoFeed");   // VideoFeeder feliratkozás / decode indítás
-#endif
-    }
-
-    void OnDestroy()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-        if (_bridge != null)
-        {
-            _bridge.Call("stopVideoFeed");
-            _bridge.Call("shutdown");
-        }
-#endif
-    }
-}
+build/outputs/aar/DJIUnityBridge.aar
 ```
 
 ---
 
-## Videó pipeline röviden (DJI oldal)
+## Unity Integration
 
-A DJI Android SDK-ban a live videó kezeléshez tipikusan ezek a komponensek vannak:
-- `VideoFeeder` – live video feed menedzsment
-- `DJICodecManager` – dekódolás (és callbackek)
-- `YuvDataCallback` – YUV frame callback (ha raw frame kell)
+Copy the built AAR here:
 
-Doksi:
-- VideoFeeder: https://developer.dji.com/api-reference/android-api/BaseClasses/DJIVideoFeeder.html
-- DJICodecManager: https://developer.dji.com/api-reference/android-api/Components/CodecManager/DJICodecManager.html
-- YuvDataCallback: https://developer.dji.com/api-reference/android-api/Components/CodecManager/DJICodecManager_YuvDataCallbackInterface.html
+```text
+DJIUnity/Assets/Plugins/Android/DJIUnityBridge.aar
+```
+
+Then rebuild the Unity Android app.
 
 ---
 
-## Gyakori hibák / troubleshooting
+## Registration Notes
 
-### 1) `NoClassDefFoundError` Unity build/run közben
-**Ok:** hiányoznak transitive dependency-k (AndroidX/Play Services/stb.).  
-**Fix:** tedd be a hiányzó dependency-ket a Unity Gradle template-be, vagy csinálj “fat AAR”-t, vagy EDM4U.
+The DJI SDK registration only succeeds if all of these match:
 
-### 2) Fekete kép / nincs render
-Előfordulhat, hogy ha a videó adat “kimegy” egy YUV callbackbe, akkor a DJI FPV widget / default render nem kap adatot.
-Ilyenkor a saját megjelenítésednek kell a frame-et kirajzolni.
+- the `DJI_API_KEY`
+- the Android package name of the built Unity app
+- the signing certificate used to sign the APK/AAB
 
-### 3) Permission / aktiválás gondok
-- ellenőrizd a manifestet
-- runtime permission kérést
-- DJI API key-t
-- első indításkor network kellhet aktiváláshoz
+Current Unity package name in this workspace:
 
----
+```text
+com.sok9hu.djibridge
+```
 
-## Release / verziózás
-
-Javaslat:
-- tarts `VERSION_NAME` / `VERSION_CODE` mezőket a Gradle configban
-- minden új AAR buildnél bumpold a verziót, és nevezd el az AAR-t pl.:
-  - `djibridge-0.3.0.aar`
-- Unity oldalon így könnyebb visszagörgetni.
+If the DJI developer portal is configured for a different package name or certificate, registration will fail and no video feed will appear.
 
 ---
 
-## Licenc
+## Troubleshooting
 
-Add meg a licencet (MIT/Apache-2.0/stb.), és tedd be a `LICENSE` fájlt a repo gyökerébe.
+### `onRegisterFailure: The metadata received from server is invalid`
+
+This usually means a DJI registration mismatch, not a rendering bug.
+
+Check:
+
+- the API key value
+- the Unity Android package name
+- the signing certificate configured on the DJI side
+
+### No video, black screen
+
+If the Unity side renders the external texture but no frames arrive:
+
+- confirm DJI SDK registration succeeded
+- confirm product connection succeeded
+- confirm the RC/phone USB accessory is visible and permission is granted
+
+### Missing Android dependencies in Unity
+
+If Unity runtime/build errors mention missing Android classes:
+
+- verify the Unity Gradle templates include the required repositories and dependencies
+- verify the correct AAR was copied into `Assets/Plugins/Android`
 
 ---
 
-## Kapcsolódó projektek
+## Related Projects
 
-- DJIUnityNative – natív Unity plugin réteg (ha használsz C/C++ textúra frissítést)
-- DJIUnity – Unity projekt, ami ezt az AAR-t fogyasztja
+- `DJIUnityNative`: native render-thread plugin for OES texture updates
+- `DJIUnity`: main Unity Android application

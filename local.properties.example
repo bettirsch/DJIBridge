@@ -1,0 +1,7 @@
+# Copy this file to local.properties and fill in your own values.
+# This file is safe to commit; local.properties is gitignored.
+#
+# Example:
+# DJI_API_KEY=your-dji-api-key-here
+
+DJI_API_KEY=
