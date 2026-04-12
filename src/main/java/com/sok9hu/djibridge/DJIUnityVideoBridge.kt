@@ -19,20 +19,23 @@ object DJIUnityVideoBridge {
     private fun cameraStreamManager(): ICameraStreamManager? =
         MediaDataCenter.getInstance().cameraStreamManager
 
+    private fun updateDecoderSurface(surface: Surface, width: Int, height: Int, caller: String) {
+        Log.i(TAG, " - $caller called")
+        controller.startOrUpdate(surface, width, height)
+    }
+
     /**
      * Unity calls this when it has (or re-has) a valid Surface from its SurfaceTexture.
      * Call it again after permission dialog / resume.
      */
     @JvmStatic
     fun setDecoderSurface(surface: Surface, width: Int, height: Int) {
-        Log.i(TAG, " - SetDecoderSurface called")
-        controller.startOrUpdate(surface, width, height)
+        updateDecoderSurface(surface, width, height, "setDecoderSurface")
     }
 
     @JvmStatic
     fun startOrUpdate(surface: Surface, width: Int, height: Int) {
-        Log.i(TAG, " - StartOrUpdate called")
-        controller.startOrUpdate(surface, width, height)
+        updateDecoderSurface(surface, width, height, "startOrUpdate")
     }
 
     @JvmStatic
