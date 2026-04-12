@@ -1,6 +1,6 @@
 # DJIBridge
 
-Android Kotlin bridge library built as an AAR for the Unity app. It integrates the DJI Mobile SDK, receives the live video stream, and exposes a Unity-callable Android plugin API.
+Android bridge library built as a single AAR for the Unity app. It now contains both the Kotlin DJI SDK integration and the native `djiunity` render plugin used by Unity for OES texture updates.
 
 The usual workflow is:
 
@@ -25,6 +25,7 @@ flowchart LR
 - initializing and registering the DJI Mobile SDK
 - connecting the decoded video pipeline to a `Surface`
 - exposing Unity-facing entry points through static Android/Kotlin APIs
+- packaging the `djiunity` native library that Unity loads via `DllImport`
 
 ---
 
@@ -41,7 +42,7 @@ flowchart LR
 
 Do not hardcode the DJI API key in source files.
 
-The project now reads the key from one of these locations:
+The project reads the key from one of these locations:
 
 1. `DJIBridge/local.properties`
 2. Gradle property: `-PDJI_API_KEY=...`
@@ -71,8 +72,6 @@ If the key was ever committed previously, treat it as exposed and rotate it in t
 
 ## Build
 
-Open the project in Android Studio or build with Gradle.
-
 Windows:
 
 ```bat
@@ -101,7 +100,7 @@ Copy the built AAR here:
 DJIUnity/Assets/Plugins/Android/DJIUnityBridge.aar
 ```
 
-Then rebuild the Unity Android app.
+This single AAR already contains the native `djiunity` library, so the old standalone `DJIUnityNative-release.aar` should not be kept in the Unity plugin folder.
 
 ---
 
@@ -116,7 +115,7 @@ The DJI SDK registration only succeeds if all of these match:
 Current Unity package name in this workspace:
 
 ```text
-com.sok9hu.djibridge
+com.sok9hu
 ```
 
 If the DJI developer portal is configured for a different package name or certificate, registration will fail and no video feed will appear.
@@ -135,6 +134,14 @@ Check:
 - the Unity Android package name
 - the signing certificate configured on the DJI side
 
+### Missing native plugin symbols in Unity
+
+If Unity reports it cannot find `djiunity` native functions:
+
+- rebuild `DJIBridge`
+- recopy `DJIUnityBridge.aar` into `Assets/Plugins/Android`
+- make sure the old `DJIUnityNative-release.aar` is no longer present alongside it
+
 ### No video, black screen
 
 If the Unity side renders the external texture but no frames arrive:
@@ -143,16 +150,9 @@ If the Unity side renders the external texture but no frames arrive:
 - confirm product connection succeeded
 - confirm the RC/phone USB accessory is visible and permission is granted
 
-### Missing Android dependencies in Unity
-
-If Unity runtime/build errors mention missing Android classes:
-
-- verify the Unity Gradle templates include the required repositories and dependencies
-- verify the correct AAR was copied into `Assets/Plugins/Android`
-
 ---
 
 ## Related Projects
 
-- `DJIUnityNative`: native render-thread plugin for OES texture updates
 - `DJIUnity`: main Unity Android application
+- `DJIUnityNative`: deprecated standalone repo kept only for history; the native code now lives in `DJIBridge`

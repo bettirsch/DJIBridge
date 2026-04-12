@@ -29,6 +29,18 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resourceConfigurations += listOf("en", "hu")
         manifestPlaceholders["DJI_API_KEY"] = djiApiKey
+        externalNativeBuild {
+            cmake {
+                cppFlags("-std=c++17")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     lint {
@@ -89,7 +101,8 @@ android {
                 "*/*/libmrtc_onvif.so",
                 "*/*/libmrtc_rtmp.so",
                 "*/*/libmrtc_rtsp.so",
-                "*/*/libSdkyclx_clx.so"
+                "*/*/libSdkyclx_clx.so",
+                "*/*/libdjiunity.so"
             )
         }
     }
