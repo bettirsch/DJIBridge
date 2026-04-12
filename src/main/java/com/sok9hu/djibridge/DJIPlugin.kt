@@ -19,7 +19,6 @@ object DJIPlugin {
 
     private var initialized = false
     private var observersAttached = false
-    private lateinit var app: Application
     private lateinit var msdkManagerVM: MSDKManagerVM
 
     @Volatile private var sdkRegistered = false
@@ -33,7 +32,6 @@ object DJIPlugin {
             return
         }
 
-        this.app = application
         Log.i(TAG, "init() called")
         logUsbState("beforeInit", application)
 
