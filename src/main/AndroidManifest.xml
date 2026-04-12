@@ -11,6 +11,12 @@
             android:name="com.dji.sdk.API_KEY"
             android:value="${DJI_API_KEY}" />
 
+        <provider
+            android:name="com.sok9hu.djibridge.DJIStartupProvider"
+            android:authorities="${applicationId}.djibridge.startup"
+            android:exported="false"
+            android:initOrder="100" />
+
         <activity
             android:name="com.unity3d.player.UnityPlayerGameActivity"
             tools:node="merge">
