@@ -68,12 +68,14 @@ object DJIPlugin {
             } else {
                 Log.w(TAG, "DJI SDK registration unavailable: ${error?.description() ?: "unknown"}")
             }
+            DJIPoseBridge.onSdkStateChanged("registerState")
             notifyVideoBridgeIfReady("registerState")
         }
 
         msdkManagerVM.lvProductConnectionState.observeForever { (isConnected, productId) ->
             productConnected = isConnected
             Log.i(TAG, "DJI product connection changed: connected=$isConnected productId=$productId")
+            DJIPoseBridge.onSdkStateChanged("productConnection")
             notifyVideoBridgeIfReady("productConnection")
         }
     }
