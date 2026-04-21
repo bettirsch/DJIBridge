@@ -16,6 +16,12 @@ class CameraStreamClient(
     private val component: ComponentIndexType,
     private val onPacket: (Packet) -> Unit
 ) {
+    private companion object {
+        // Enabling DJI's keep-alive decoding currently spins up an internal encoder path
+        // on some devices, which floods logcat with MediaCodec render -38 noise.
+        private const val ENABLE_KEEP_ALIVE_DECODING = false
+    }
+
     private val log = PipelineLog(tag)
 
     private var listener: ReceiveStreamListener? = null
@@ -56,12 +62,7 @@ class CameraStreamClient(
         listener = l
         manager.addReceiveStreamListener(component, l)
 
-        try {
-            manager.setKeepAliveDecoding(true)
-            log.i("setKeepAliveDecoding(true)")
-        } catch (t: Throwable) {
-            log.w("setKeepAliveDecoding(true) failed", t)
-        }
+        updateKeepAliveDecoding(ENABLE_KEEP_ALIVE_DECODING)
     }
 
     fun stop() {
@@ -74,6 +75,17 @@ class CameraStreamClient(
             manager.removeReceiveStreamListener(l)
         } catch (t: Throwable) {
             log.w("removeReceiveStreamListener failed", t)
+        }
+
+        updateKeepAliveDecoding(false)
+    }
+
+    private fun updateKeepAliveDecoding(enable: Boolean) {
+        try {
+            manager.setKeepAliveDecoding(enable)
+            log.i("setKeepAliveDecoding($enable)")
+        } catch (t: Throwable) {
+            log.w("setKeepAliveDecoding($enable) failed", t)
         }
     }
 

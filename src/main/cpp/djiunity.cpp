@@ -29,6 +29,7 @@ static float g_texTransform[16] = {
 static uint64_t g_updates = 0;
 static uint64_t g_prevUpdateMs = 0;
 static uint64_t g_lastHeartbeatMs = 0;
+static constexpr bool kVerboseUpdateTexImageLogs = false;
 
 static uint64_t NowMs() {
     struct timespec ts;
@@ -233,7 +234,8 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventID) {
         g_prevUpdateMs = now;
         g_updates++;
 
-        if (g_lastHeartbeatMs == 0 || (now - g_lastHeartbeatMs) >= 1000) {
+        if (kVerboseUpdateTexImageLogs &&
+            (g_lastHeartbeatMs == 0 || (now - g_lastHeartbeatMs) >= 1000)) {
             g_lastHeartbeatMs = now;
             LOGI("DJIBridgeNative - updateTexImage ok updates=%llu gapMs=%llu tex=%u st=%p",
                  (unsigned long long)g_updates,
