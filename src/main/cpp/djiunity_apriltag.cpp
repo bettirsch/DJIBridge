@@ -10,6 +10,7 @@
 extern "C" {
 #include "apriltag.h"
 #include "common/image_u8.h"
+#include "common/homography.h"
 #include "tagStandard41h12.h"
 }
 
@@ -28,6 +29,7 @@ namespace
 {
 constexpr int kNoTargetTagId = -1;
 constexpr int kRequiredOutputLength = 12;
+constexpr int kRequiredPoseOutputLength = 12;
 constexpr int kDetectorThreads = 2;
 constexpr float kQuadDecimate = 2.0f;
 constexpr float kDecodeSharpening = 0.25f;
@@ -45,6 +47,14 @@ void ResetOutput(float* outDetection, int outDetectionLength)
 
     std::fill(outDetection, outDetection + outDetectionLength, 0.0f);
     outDetection[0] = -1.0f;
+}
+
+void ResetPoseOutput(float* outPose, int outPoseLength)
+{
+    if (outPose == nullptr || outPoseLength <= 0)
+        return;
+
+    std::fill(outPose, outPose + outPoseLength, 0.0f);
 }
 
 void ReleaseDetectorLocked()
@@ -105,6 +115,98 @@ float NormalizeCoordinate(double value, int dimension)
     const auto normalized = static_cast<float>(value / static_cast<double>(dimension));
     return std::clamp(normalized, 0.0f, 1.0f);
 }
+
+bool DetectAprilTagLocked(
+    const uint8_t* rgbaBytes,
+    int width,
+    int height,
+    float* outDetection,
+    float* outPose,
+    double fx,
+    double fy,
+    double cx,
+    double cy,
+    double tagSizeMeters)
+{
+    const auto pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    g_grayscaleBuffer.resize(pixelCount);
+
+    for (size_t pixelIndex = 0, rgbaIndex = 0; pixelIndex < pixelCount; ++pixelIndex, rgbaIndex += 4) {
+        const auto r = rgbaBytes[rgbaIndex];
+        const auto g = rgbaBytes[rgbaIndex + 1];
+        const auto b = rgbaBytes[rgbaIndex + 2];
+        g_grayscaleBuffer[pixelIndex] = static_cast<uint8_t>((77 * r + 150 * g + 29 * b) >> 8);
+    }
+
+    image_u8_t image = {
+        width,
+        height,
+        width,
+        g_grayscaleBuffer.data()
+    };
+
+    zarray_t* detections = apriltag_detector_detect(g_detector, &image);
+    if (detections == nullptr)
+        return false;
+
+    const auto detectionCount = zarray_size(detections);
+    apriltag_detection_t* bestDetection = nullptr;
+    auto bestScore = -DBL_MAX;
+
+    for (int index = 0; index < detectionCount; ++index) {
+        apriltag_detection_t* current = nullptr;
+        zarray_get(detections, index, &current);
+        if (current == nullptr)
+            continue;
+
+        const auto isTargetTag = g_targetTagId == kNoTargetTagId || current->id == g_targetTagId;
+        const auto score = ComputeScore(current, isTargetTag);
+        if (score <= bestScore)
+            continue;
+
+        bestScore = score;
+        bestDetection = current;
+    }
+
+    if (bestDetection == nullptr) {
+        apriltag_detections_destroy(detections);
+        return false;
+    }
+
+    outDetection[0] = static_cast<float>(bestDetection->id);
+    outDetection[1] = NormalizeCoordinate(bestDetection->c[0], width);
+    outDetection[2] = NormalizeCoordinate(bestDetection->c[1], height);
+    outDetection[3] = NormalizeCoordinate(bestDetection->p[0][0], width);
+    outDetection[4] = NormalizeCoordinate(bestDetection->p[0][1], height);
+    outDetection[5] = NormalizeCoordinate(bestDetection->p[1][0], width);
+    outDetection[6] = NormalizeCoordinate(bestDetection->p[1][1], height);
+    outDetection[7] = NormalizeCoordinate(bestDetection->p[2][0], width);
+    outDetection[8] = NormalizeCoordinate(bestDetection->p[2][1], height);
+    outDetection[9] = NormalizeCoordinate(bestDetection->p[3][0], width);
+    outDetection[10] = NormalizeCoordinate(bestDetection->p[3][1], height);
+    outDetection[11] = static_cast<float>(bestDetection->decision_margin);
+
+    if (outPose != nullptr) {
+        matd_t* pose = homography_to_pose(bestDetection->H, fx, fy, cx, cy);
+        if (pose == nullptr) {
+            apriltag_detections_destroy(detections);
+            return false;
+        }
+
+        const auto tagHalfSizeMeters = tagSizeMeters * 0.5;
+        outPose[0] = static_cast<float>(MATD_EL(pose, 0, 3) * tagHalfSizeMeters);
+        outPose[1] = static_cast<float>(MATD_EL(pose, 1, 3) * tagHalfSizeMeters);
+        outPose[2] = static_cast<float>(MATD_EL(pose, 2, 3) * tagHalfSizeMeters);
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column)
+                outPose[3 + row * 3 + column] = static_cast<float>(MATD_EL(pose, row, column));
+        }
+        matd_destroy(pose);
+    }
+
+    apriltag_detections_destroy(detections);
+    return true;
+}
 } // namespace
 
 extern "C" {
@@ -139,66 +241,36 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagRgba32(
     if (!EnsureDetectorLocked())
         return 0;
 
-    const auto pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-    g_grayscaleBuffer.resize(pixelCount);
+    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, nullptr, 0.0, 0.0, 0.0, 0.0, 0.0) ? 1 : 0;
+}
 
-    for (size_t pixelIndex = 0, rgbaIndex = 0; pixelIndex < pixelCount; ++pixelIndex, rgbaIndex += 4) {
-        const auto r = rgbaBytes[rgbaIndex];
-        const auto g = rgbaBytes[rgbaIndex + 1];
-        const auto b = rgbaBytes[rgbaIndex + 2];
-        g_grayscaleBuffer[pixelIndex] = static_cast<uint8_t>((77 * r + 150 * g + 29 * b) >> 8);
-    }
+JNIEXPORT int JNICALL DJI_DetectAprilTagPoseRgba32(
+    const uint8_t* rgbaBytes,
+    int width,
+    int height,
+    float fx,
+    float fy,
+    float cx,
+    float cy,
+    float tagSizeMeters,
+    float* outDetection,
+    int outDetectionLength,
+    float* outPose,
+    int outPoseLength)
+{
+    ResetOutput(outDetection, outDetectionLength);
+    ResetPoseOutput(outPose, outPoseLength);
 
-    image_u8_t image = {
-        width,
-        height,
-        width,
-        g_grayscaleBuffer.data()
-    };
-
-    zarray_t* detections = apriltag_detector_detect(g_detector, &image);
-    if (detections == nullptr)
+    if (rgbaBytes == nullptr || width <= 0 || height <= 0 || outDetection == nullptr || outDetectionLength < kRequiredOutputLength ||
+        outPose == nullptr || outPoseLength < kRequiredPoseOutputLength || !std::isfinite(fx) || !std::isfinite(fy) ||
+        !std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(tagSizeMeters) || fx <= 0.0f || fy <= 0.0f || tagSizeMeters <= 0.0f)
         return 0;
 
-    const auto detectionCount = zarray_size(detections);
-    apriltag_detection_t* bestDetection = nullptr;
-    auto bestScore = -DBL_MAX;
-
-    for (int index = 0; index < detectionCount; ++index) {
-        apriltag_detection_t* current = nullptr;
-        zarray_get(detections, index, &current);
-        if (current == nullptr)
-            continue;
-
-        const auto isTargetTag = g_targetTagId == kNoTargetTagId || current->id == g_targetTagId;
-        const auto score = ComputeScore(current, isTargetTag);
-        if (score <= bestScore)
-            continue;
-
-        bestScore = score;
-        bestDetection = current;
-    }
-
-    if (bestDetection == nullptr) {
-        apriltag_detections_destroy(detections);
+    std::lock_guard<std::mutex> lock(g_detectorMutex);
+    if (!EnsureDetectorLocked())
         return 0;
-    }
 
-    outDetection[0] = static_cast<float>(bestDetection->id);
-    outDetection[1] = NormalizeCoordinate(bestDetection->c[0], width);
-    outDetection[2] = NormalizeCoordinate(bestDetection->c[1], height);
-    outDetection[3] = NormalizeCoordinate(bestDetection->p[0][0], width);
-    outDetection[4] = NormalizeCoordinate(bestDetection->p[0][1], height);
-    outDetection[5] = NormalizeCoordinate(bestDetection->p[1][0], width);
-    outDetection[6] = NormalizeCoordinate(bestDetection->p[1][1], height);
-    outDetection[7] = NormalizeCoordinate(bestDetection->p[2][0], width);
-    outDetection[8] = NormalizeCoordinate(bestDetection->p[2][1], height);
-    outDetection[9] = NormalizeCoordinate(bestDetection->p[3][0], width);
-    outDetection[10] = NormalizeCoordinate(bestDetection->p[3][1], height);
-    outDetection[11] = static_cast<float>(bestDetection->decision_margin);
-
-    apriltag_detections_destroy(detections);
-    return 1;
+    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, outPose, fx, fy, cx, cy, tagSizeMeters) ? 1 : 0;
 }
 
 } // extern "C"
