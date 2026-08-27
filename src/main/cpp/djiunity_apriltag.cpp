@@ -32,6 +32,9 @@ namespace
 constexpr int kNoTargetTagId = -1;
 constexpr int kRequiredOutputLength = 12;
 constexpr int kRequiredPoseOutputLength = 12;
+constexpr int kMaximumPoseCandidates = 2;
+constexpr int kPoseCandidateStride = 13;
+constexpr int kRequiredPoseCandidateOutputLength = kMaximumPoseCandidates * kPoseCandidateStride;
 constexpr int kDetectorThreads = 2;
 constexpr float kQuadDecimate = 2.0f;
 constexpr float kDecodeSharpening = 0.25f;
@@ -57,6 +60,19 @@ void ResetPoseOutput(float* outPose, int outPoseLength)
         return;
 
     std::fill(outPose, outPose + outPoseLength, 0.0f);
+}
+
+void ResetPoseCandidateOutput(float* outPoseCandidates, int outPoseCandidatesLength)
+{
+    if (outPoseCandidates == nullptr || outPoseCandidatesLength <= 0)
+        return;
+
+    std::fill(outPoseCandidates, outPoseCandidates + outPoseCandidatesLength, 0.0f);
+    for (int candidateIndex = 0; candidateIndex < kMaximumPoseCandidates; ++candidateIndex) {
+        const auto errorOffset = candidateIndex * kPoseCandidateStride + kRequiredPoseOutputLength;
+        if (errorOffset < outPoseCandidatesLength)
+            outPoseCandidates[errorOffset] = FLT_MAX;
+    }
 }
 
 void ReleaseDetectorLocked()
@@ -129,17 +145,18 @@ bool IsFiniteMatrix(const cv::Mat& matrix)
     return true;
 }
 
-bool SolveAprilTagPose(
+int SolveAprilTagPoseCandidates(
     const apriltag_detection_t* detection,
     double fx,
     double fy,
     double cx,
     double cy,
     double tagSizeMeters,
-    float* outPose)
+    float* outPoseCandidates,
+    int outPoseCandidatesLength)
 {
-    if (detection == nullptr || outPose == nullptr)
-        return false;
+    if (detection == nullptr || outPoseCandidates == nullptr || outPoseCandidatesLength < kPoseCandidateStride)
+        return 0;
 
     const auto halfTagSize = tagSizeMeters * 0.5;
     // This order is mandated by OpenCV's SOLVEPNP_IPPE_SQUARE implementation.
@@ -175,21 +192,32 @@ bool SolveAprilTagPose(
                 false,
                 cv::SOLVEPNP_IPPE_SQUARE) == 0)
         {
-            return false;
+            return 0;
         }
     }
     catch (const cv::Exception&) {
-        return false;
+        return 0;
     }
 
-    auto bestError = DBL_MAX;
-    cv::Mat bestRotation;
-    cv::Mat bestTranslation;
+    auto candidateCount = 0;
     for (size_t index = 0; index < rotationVectors.size() && index < translationVectors.size(); ++index) {
-        const auto& rotationVector = rotationVectors[index];
-        const auto& translationVector = translationVectors[index];
+        auto rotationVector = rotationVectors[index].clone();
+        auto translationVector = translationVectors[index].clone();
         if (rotationVector.empty() || translationVector.empty() ||
             !IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
+            translationVector.at<double>(2, 0) <= 0.0)
+        {
+            continue;
+        }
+
+        try {
+            cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, zeroDistortion, rotationVector, translationVector);
+        }
+        catch (const cv::Exception&) {
+            continue;
+        }
+
+        if (!IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
             translationVector.at<double>(2, 0) <= 0.0)
         {
             continue;
@@ -206,30 +234,29 @@ bool SolveAprilTagPose(
             squaredError += delta.dot(delta);
         }
         const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
-        if (std::isfinite(rmsError) && rmsError < bestError) {
-            bestError = rmsError;
-            bestRotation = rotationVector;
-            bestTranslation = translationVector;
+        if (!std::isfinite(rmsError) || rmsError > 6.0 || candidateCount >= kMaximumPoseCandidates ||
+            (candidateCount + 1) * kPoseCandidateStride > outPoseCandidatesLength)
+        {
+            continue;
         }
+
+        cv::Mat rotationMatrix;
+        cv::Rodrigues(rotationVector, rotationMatrix);
+        if (!IsFiniteMatrix(rotationMatrix))
+            continue;
+
+        const auto outputOffset = candidateCount * kPoseCandidateStride;
+        outPoseCandidates[outputOffset] = static_cast<float>(translationVector.at<double>(0, 0));
+        outPoseCandidates[outputOffset + 1] = static_cast<float>(translationVector.at<double>(1, 0));
+        outPoseCandidates[outputOffset + 2] = static_cast<float>(translationVector.at<double>(2, 0));
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column)
+                outPoseCandidates[outputOffset + 3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
+        }
+        outPoseCandidates[outputOffset + kRequiredPoseOutputLength] = static_cast<float>(rmsError);
+        ++candidateCount;
     }
-
-    // Reject a numerically valid but geometrically implausible fit.
-    if (bestRotation.empty() || bestTranslation.empty() || bestError > 6.0)
-        return false;
-
-    cv::Mat rotationMatrix;
-    cv::Rodrigues(bestRotation, rotationMatrix);
-    if (!IsFiniteMatrix(rotationMatrix) || !IsFiniteMatrix(bestTranslation))
-        return false;
-
-    outPose[0] = static_cast<float>(bestTranslation.at<double>(0, 0));
-    outPose[1] = static_cast<float>(bestTranslation.at<double>(1, 0));
-    outPose[2] = static_cast<float>(bestTranslation.at<double>(2, 0));
-    for (int row = 0; row < 3; ++row) {
-        for (int column = 0; column < 3; ++column)
-            outPose[3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
-    }
-    return true;
+    return candidateCount;
 }
 
 bool DetectAprilTagLocked(
@@ -238,6 +265,8 @@ bool DetectAprilTagLocked(
     int height,
     float* outDetection,
     float* outPose,
+    float* outPoseCandidates,
+    int outPoseCandidatesLength,
     double fx,
     double fy,
     double cx,
@@ -305,11 +334,19 @@ bool DetectAprilTagLocked(
     outDetection[10] = NormalizeCoordinate(bestDetection->p[3][1], height);
     outDetection[11] = static_cast<float>(bestDetection->decision_margin);
 
-    if (outPose != nullptr) {
-        if (!SolveAprilTagPose(bestDetection, fx, fy, cx, cy, tagSizeMeters, outPose)) {
+    if (outPose != nullptr || outPoseCandidates != nullptr) {
+        float legacyPoseCandidates[kRequiredPoseCandidateOutputLength];
+        auto* poseCandidates = outPoseCandidates != nullptr ? outPoseCandidates : legacyPoseCandidates;
+        const auto poseCandidatesLength = outPoseCandidates != nullptr ? outPoseCandidatesLength : kRequiredPoseCandidateOutputLength;
+        const auto poseCandidateCount = SolveAprilTagPoseCandidates(
+            bestDetection, fx, fy, cx, cy, tagSizeMeters, poseCandidates, poseCandidatesLength);
+        if (poseCandidateCount <= 0) {
             apriltag_detections_destroy(detections);
             return false;
         }
+
+        if (outPose != nullptr)
+            std::copy(poseCandidates, poseCandidates + kRequiredPoseOutputLength, outPose);
     }
 
     apriltag_detections_destroy(detections);
@@ -349,7 +386,7 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagRgba32(
     if (!EnsureDetectorLocked())
         return 0;
 
-    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, nullptr, 0.0, 0.0, 0.0, 0.0, 0.0) ? 1 : 0;
+    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, nullptr, nullptr, 0, 0.0, 0.0, 0.0, 0.0, 0.0) ? 1 : 0;
 }
 
 JNIEXPORT int JNICALL DJI_DetectAprilTagPoseRgba32(
@@ -378,7 +415,45 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseRgba32(
     if (!EnsureDetectorLocked())
         return 0;
 
-    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, outPose, fx, fy, cx, cy, tagSizeMeters) ? 1 : 0;
+    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, outPose, nullptr, 0, fx, fy, cx, cy, tagSizeMeters) ? 1 : 0;
+}
+
+JNIEXPORT int JNICALL DJI_DetectAprilTagPoseCandidatesRgba32(
+    const uint8_t* rgbaBytes,
+    int width,
+    int height,
+    float fx,
+    float fy,
+    float cx,
+    float cy,
+    float tagSizeMeters,
+    float* outDetection,
+    int outDetectionLength,
+    float* outPoseCandidates,
+    int outPoseCandidatesLength)
+{
+    ResetOutput(outDetection, outDetectionLength);
+    ResetPoseCandidateOutput(outPoseCandidates, outPoseCandidatesLength);
+
+    if (rgbaBytes == nullptr || width <= 0 || height <= 0 || outDetection == nullptr || outDetectionLength < kRequiredOutputLength ||
+        outPoseCandidates == nullptr || outPoseCandidatesLength < kRequiredPoseCandidateOutputLength || !std::isfinite(fx) || !std::isfinite(fy) ||
+        !std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(tagSizeMeters) || fx <= 0.0f || fy <= 0.0f || tagSizeMeters <= 0.0f)
+    {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(g_detectorMutex);
+    if (!EnsureDetectorLocked())
+        return 0;
+
+    DetectAprilTagLocked(
+        rgbaBytes, width, height, outDetection, nullptr, outPoseCandidates, outPoseCandidatesLength, fx, fy, cx, cy, tagSizeMeters);
+    auto candidateCount = 0;
+    for (int candidateIndex = 0; candidateIndex < kMaximumPoseCandidates; ++candidateIndex) {
+        if (outPoseCandidates[candidateIndex * kPoseCandidateStride + kRequiredPoseOutputLength] < FLT_MAX)
+            ++candidateCount;
+    }
+    return candidateCount;
 }
 
 } // extern "C"
