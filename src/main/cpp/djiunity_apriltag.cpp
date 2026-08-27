@@ -201,13 +201,26 @@ int SolveAprilTagPoseCandidates(
 
     auto candidateCount = 0;
     for (size_t index = 0; index < rotationVectors.size() && index < translationVectors.size(); ++index) {
-        // Keep IPPE's two hypotheses intact. Refining both candidates independently
-        // can pull them into different local minima and makes the Unity-side
-        // temporal selector unable to reason about the planar ambiguity.
-        const auto& rotationVector = rotationVectors[index];
-        const auto& translationVector = translationVectors[index];
+        // Start each refinement from its own IPPE hypothesis. The Unity side
+        // selects between the resulting poses in ARCore world space, so both
+        // hypotheses must be retained rather than choosing OpenCV's first one.
+        auto rotationVector = rotationVectors[index].clone();
+        auto translationVector = translationVectors[index].clone();
         if (rotationVector.empty() || translationVector.empty() ||
             !IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
+            translationVector.at<double>(2, 0) <= 0.0)
+        {
+            continue;
+        }
+
+        try {
+            cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, zeroDistortion, rotationVector, translationVector);
+        }
+        catch (const cv::Exception&) {
+            continue;
+        }
+
+        if (!IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
             translationVector.at<double>(2, 0) <= 0.0)
         {
             continue;
@@ -224,7 +237,7 @@ int SolveAprilTagPoseCandidates(
             squaredError += delta.dot(delta);
         }
         const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
-        if (!std::isfinite(rmsError) || rmsError > 6.0 || candidateCount >= kMaximumPoseCandidates ||
+        if (!std::isfinite(rmsError) || rmsError > 12.0 || candidateCount >= kMaximumPoseCandidates ||
             (candidateCount + 1) * kPoseCandidateStride > outPoseCandidatesLength)
         {
             continue;
