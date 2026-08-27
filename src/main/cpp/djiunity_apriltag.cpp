@@ -7,11 +7,12 @@
 #include <mutex>
 #include <vector>
 
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
+
 extern "C" {
 #include "apriltag.h"
 #include "common/image_u8.h"
-#include "common/homography.h"
-#include "contrib/pose.h"
 #include "tagStandard41h12.h"
 }
 
@@ -117,6 +118,120 @@ float NormalizeCoordinate(double value, int dimension)
     return std::clamp(normalized, 0.0f, 1.0f);
 }
 
+bool IsFiniteMatrix(const cv::Mat& matrix)
+{
+    for (int row = 0; row < matrix.rows; ++row) {
+        for (int column = 0; column < matrix.cols; ++column) {
+            if (!std::isfinite(matrix.at<double>(row, column)))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool SolveAprilTagPose(
+    const apriltag_detection_t* detection,
+    double fx,
+    double fy,
+    double cx,
+    double cy,
+    double tagSizeMeters,
+    float* outPose)
+{
+    if (detection == nullptr || outPose == nullptr)
+        return false;
+
+    const auto halfTagSize = tagSizeMeters * 0.5;
+    // This order is mandated by OpenCV's SOLVEPNP_IPPE_SQUARE implementation.
+    const std::vector<cv::Point3d> objectPoints = {
+        {-halfTagSize, halfTagSize, 0.0},
+        {halfTagSize, halfTagSize, 0.0},
+        {halfTagSize, -halfTagSize, 0.0},
+        {-halfTagSize, -halfTagSize, 0.0},
+    };
+    const std::vector<cv::Point2d> imagePoints = {
+        {detection->p[0][0], detection->p[0][1]},
+        {detection->p[1][0], detection->p[1][1]},
+        {detection->p[2][0], detection->p[2][1]},
+        {detection->p[3][0], detection->p[3][1]},
+    };
+
+    const cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) <<
+        fx, 0.0, cx,
+        0.0, fy, cy,
+        0.0, 0.0, 1.0);
+    const cv::Mat zeroDistortion = cv::Mat::zeros(4, 1, CV_64F);
+    std::vector<cv::Mat> rotationVectors;
+    std::vector<cv::Mat> translationVectors;
+
+    try {
+        if (cv::solvePnPGeneric(
+                objectPoints,
+                imagePoints,
+                cameraMatrix,
+                zeroDistortion,
+                rotationVectors,
+                translationVectors,
+                false,
+                cv::SOLVEPNP_IPPE_SQUARE) == 0)
+        {
+            return false;
+        }
+    }
+    catch (const cv::Exception&) {
+        return false;
+    }
+
+    auto bestError = DBL_MAX;
+    cv::Mat bestRotation;
+    cv::Mat bestTranslation;
+    for (size_t index = 0; index < rotationVectors.size() && index < translationVectors.size(); ++index) {
+        const auto& rotationVector = rotationVectors[index];
+        const auto& translationVector = translationVectors[index];
+        if (rotationVector.empty() || translationVector.empty() ||
+            !IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
+            translationVector.at<double>(2, 0) <= 0.0)
+        {
+            continue;
+        }
+
+        std::vector<cv::Point2d> reprojectedPoints;
+        cv::projectPoints(objectPoints, rotationVector, translationVector, cameraMatrix, zeroDistortion, reprojectedPoints);
+        if (reprojectedPoints.size() != imagePoints.size())
+            continue;
+
+        auto squaredError = 0.0;
+        for (size_t pointIndex = 0; pointIndex < imagePoints.size(); ++pointIndex) {
+            const auto delta = reprojectedPoints[pointIndex] - imagePoints[pointIndex];
+            squaredError += delta.dot(delta);
+        }
+        const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
+        if (std::isfinite(rmsError) && rmsError < bestError) {
+            bestError = rmsError;
+            bestRotation = rotationVector;
+            bestTranslation = translationVector;
+        }
+    }
+
+    // Reject a numerically valid but geometrically implausible fit.
+    if (bestRotation.empty() || bestTranslation.empty() || bestError > 6.0)
+        return false;
+
+    cv::Mat rotationMatrix;
+    cv::Rodrigues(bestRotation, rotationMatrix);
+    if (!IsFiniteMatrix(rotationMatrix) || !IsFiniteMatrix(bestTranslation))
+        return false;
+
+    outPose[0] = static_cast<float>(bestTranslation.at<double>(0, 0));
+    outPose[1] = static_cast<float>(bestTranslation.at<double>(1, 0));
+    outPose[2] = static_cast<float>(bestTranslation.at<double>(2, 0));
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column)
+            outPose[3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
+    }
+    return true;
+}
+
 bool DetectAprilTagLocked(
     const uint8_t* rgbaBytes,
     int width,
@@ -191,38 +306,10 @@ bool DetectAprilTagLocked(
     outDetection[11] = static_cast<float>(bestDetection->decision_margin);
 
     if (outPose != nullptr) {
-        const double corners[4][2] = {
-            {bestDetection->p[0][0], bestDetection->p[0][1]},
-            {bestDetection->p[1][0], bestDetection->p[1][1]},
-            {bestDetection->p[2][0], bestDetection->p[2][1]},
-            {bestDetection->p[3][0], bestDetection->p[3][1]},
-        };
-        double initialError = 0.0;
-        double finalError = 0.0;
-        matd_t* pose = pose_from_homography(
-            bestDetection->H,
-            fx,
-            fy,
-            cx,
-            cy,
-            tagSizeMeters,
-            1.0,
-            corners,
-            &initialError,
-            &finalError);
-        if (pose == nullptr) {
+        if (!SolveAprilTagPose(bestDetection, fx, fy, cx, cy, tagSizeMeters, outPose)) {
             apriltag_detections_destroy(detections);
             return false;
         }
-
-        outPose[0] = static_cast<float>(MATD_EL(pose, 0, 3));
-        outPose[1] = static_cast<float>(MATD_EL(pose, 1, 3));
-        outPose[2] = static_cast<float>(MATD_EL(pose, 2, 3));
-        for (int row = 0; row < 3; ++row) {
-            for (int column = 0; column < 3; ++column)
-                outPose[3 + row * 3 + column] = static_cast<float>(MATD_EL(pose, row, column));
-        }
-        matd_destroy(pose);
     }
 
     apriltag_detections_destroy(detections);

@@ -6,6 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# OpenCV's Android AAR publishes this target through Gradle Prefab.
+find_package(OpenCV REQUIRED CONFIG)
+
 file(GLOB APRILTAG_COMMON_SRC
         apriltag/common/*.c
 )
@@ -15,7 +18,6 @@ add_library(djiunity SHARED
         djiunity_apriltag.cpp
         apriltag/apriltag.c
         apriltag/apriltag_quad_thresh.c
-        apriltag/contrib/pose.c
         apriltag/tagStandard41h12.c
         ${APRILTAG_COMMON_SRC}
 )
@@ -38,4 +40,5 @@ target_link_libraries(djiunity
         ${GLESv2-lib}
         ${EGL-lib}
         ${m-lib}
+        OpenCV::opencv_java4
 )
