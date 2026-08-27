@@ -160,6 +160,9 @@ bool DetectAprilTagLocked(
             continue;
 
         const auto isTargetTag = g_targetTagId == kNoTargetTagId || current->id == g_targetTagId;
+        if (!isTargetTag)
+            continue;
+
         const auto score = ComputeScore(current, isTargetTag);
         if (score <= bestScore)
             continue;
