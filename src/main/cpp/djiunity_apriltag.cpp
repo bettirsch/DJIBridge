@@ -44,6 +44,10 @@ apriltag_detector_t* g_detector = nullptr;
 apriltag_family_t* g_family = nullptr;
 std::vector<uint8_t> g_grayscaleBuffer;
 int g_targetTagId = 0;
+std::once_flag g_poseConventionSelfTestOnce;
+bool g_poseConventionSelfTestPassed = false;
+
+bool RunPoseConventionSelfTest();
 
 void ResetOutput(float* outDetection, int outDetectionLength)
 {
@@ -95,6 +99,16 @@ bool EnsureDetectorLocked()
     if (g_detector != nullptr && g_family != nullptr)
         return true;
 
+    std::call_once(g_poseConventionSelfTestOnce, [] {
+        g_poseConventionSelfTestPassed = RunPoseConventionSelfTest();
+        if (g_poseConventionSelfTestPassed)
+            APRILTAG_LOGI("AprilTag IPPE square convention self-test passed.");
+        else
+            APRILTAG_LOGW("AprilTag IPPE square convention self-test failed.");
+    });
+    if (!g_poseConventionSelfTestPassed)
+        return false;
+
     ReleaseDetectorLocked();
 
     g_detector = apriltag_detector_create();
@@ -145,6 +159,76 @@ bool IsFiniteMatrix(const cv::Mat& matrix)
     return true;
 }
 
+std::vector<cv::Point3d> CreateIppeSquareObjectPoints(double tagSizeMeters)
+{
+    const auto halfTagSize = tagSizeMeters * 0.5;
+    // Required by SOLVEPNP_IPPE_SQUARE and matched to AprilTag's p[0..3] winding.
+    return {
+        {-halfTagSize, halfTagSize, 0.0},
+        {halfTagSize, halfTagSize, 0.0},
+        {halfTagSize, -halfTagSize, 0.0},
+        {-halfTagSize, -halfTagSize, 0.0},
+    };
+}
+
+double ComputeReprojectionRms(
+    const std::vector<cv::Point3d>& objectPoints,
+    const std::vector<cv::Point2d>& imagePoints,
+    const cv::Mat& rotationVector,
+    const cv::Mat& translationVector,
+    const cv::Mat& cameraMatrix,
+    const cv::Mat& distortion)
+{
+    std::vector<cv::Point2d> reprojectedPoints;
+    cv::projectPoints(objectPoints, rotationVector, translationVector, cameraMatrix, distortion, reprojectedPoints);
+    if (reprojectedPoints.size() != imagePoints.size())
+        return DBL_MAX;
+
+    auto squaredError = 0.0;
+    for (size_t pointIndex = 0; pointIndex < imagePoints.size(); ++pointIndex) {
+        const auto delta = reprojectedPoints[pointIndex] - imagePoints[pointIndex];
+        squaredError += delta.dot(delta);
+    }
+    return std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
+}
+
+bool WritePoseCandidate(
+    const cv::Mat& rotationVector,
+    const cv::Mat& translationVector,
+    const cv::Mat& cameraMatrix,
+    const cv::Mat& distortion,
+    const std::vector<cv::Point3d>& objectPoints,
+    const std::vector<cv::Point2d>& imagePoints,
+    float* outPose,
+    int outPoseLength)
+{
+    if (outPose == nullptr || outPoseLength < kPoseCandidateStride ||
+        !IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
+        translationVector.at<double>(2, 0) <= 0.0)
+    {
+        return false;
+    }
+
+    const auto rmsError = ComputeReprojectionRms(objectPoints, imagePoints, rotationVector, translationVector, cameraMatrix, distortion);
+    if (!std::isfinite(rmsError) || rmsError > 6.0)
+        return false;
+
+    cv::Mat rotationMatrix;
+    cv::Rodrigues(rotationVector, rotationMatrix);
+    if (!IsFiniteMatrix(rotationMatrix))
+        return false;
+
+    outPose[0] = static_cast<float>(translationVector.at<double>(0, 0));
+    outPose[1] = static_cast<float>(translationVector.at<double>(1, 0));
+    outPose[2] = static_cast<float>(translationVector.at<double>(2, 0));
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column)
+            outPose[3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
+    }
+    outPose[kRequiredPoseOutputLength] = static_cast<float>(rmsError);
+    return true;
+}
+
 int SolveAprilTagPoseCandidates(
     const apriltag_detection_t* detection,
     double fx,
@@ -158,14 +242,7 @@ int SolveAprilTagPoseCandidates(
     if (detection == nullptr || outPoseCandidates == nullptr || outPoseCandidatesLength < kPoseCandidateStride)
         return 0;
 
-    const auto halfTagSize = tagSizeMeters * 0.5;
-    // This order is mandated by OpenCV's SOLVEPNP_IPPE_SQUARE implementation.
-    const std::vector<cv::Point3d> objectPoints = {
-        {-halfTagSize, halfTagSize, 0.0},
-        {halfTagSize, halfTagSize, 0.0},
-        {halfTagSize, -halfTagSize, 0.0},
-        {-halfTagSize, -halfTagSize, 0.0},
-    };
+    const auto objectPoints = CreateIppeSquareObjectPoints(tagSizeMeters);
     const std::vector<cv::Point2d> imagePoints = {
         {detection->p[0][0], detection->p[0][1]},
         {detection->p[1][0], detection->p[1][1]},
@@ -210,53 +287,131 @@ int SolveAprilTagPoseCandidates(
             continue;
         }
 
-        try {
-            cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, zeroDistortion, rotationVector, translationVector);
-        }
-        catch (const cv::Exception&) {
-            continue;
-        }
-
-        if (!IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
-            translationVector.at<double>(2, 0) <= 0.0)
-        {
-            continue;
-        }
-
-        std::vector<cv::Point2d> reprojectedPoints;
-        cv::projectPoints(objectPoints, rotationVector, translationVector, cameraMatrix, zeroDistortion, reprojectedPoints);
-        if (reprojectedPoints.size() != imagePoints.size())
-            continue;
-
-        auto squaredError = 0.0;
-        for (size_t pointIndex = 0; pointIndex < imagePoints.size(); ++pointIndex) {
-            const auto delta = reprojectedPoints[pointIndex] - imagePoints[pointIndex];
-            squaredError += delta.dot(delta);
-        }
-        const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
-        if (!std::isfinite(rmsError) || rmsError > 6.0 || candidateCount >= kMaximumPoseCandidates ||
+        if (candidateCount >= kMaximumPoseCandidates ||
             (candidateCount + 1) * kPoseCandidateStride > outPoseCandidatesLength)
         {
             continue;
         }
 
-        cv::Mat rotationMatrix;
-        cv::Rodrigues(rotationVector, rotationMatrix);
-        if (!IsFiniteMatrix(rotationMatrix))
-            continue;
-
         const auto outputOffset = candidateCount * kPoseCandidateStride;
-        outPoseCandidates[outputOffset] = static_cast<float>(translationVector.at<double>(0, 0));
-        outPoseCandidates[outputOffset + 1] = static_cast<float>(translationVector.at<double>(1, 0));
-        outPoseCandidates[outputOffset + 2] = static_cast<float>(translationVector.at<double>(2, 0));
-        for (int row = 0; row < 3; ++row) {
-            for (int column = 0; column < 3; ++column)
-                outPoseCandidates[outputOffset + 3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
+        if (WritePoseCandidate(
+                rotationVector,
+                translationVector,
+                cameraMatrix,
+                zeroDistortion,
+                objectPoints,
+                imagePoints,
+                outPoseCandidates + outputOffset,
+                outPoseCandidatesLength - outputOffset))
+        {
+            ++candidateCount;
         }
-        outPoseCandidates[outputOffset + kRequiredPoseOutputLength] = static_cast<float>(rmsError);
-        ++candidateCount;
     }
     return candidateCount;
+}
+
+bool RefineAprilTagPoseCandidate(
+    int width,
+    int height,
+    double fx,
+    double fy,
+    double cx,
+    double cy,
+    double tagSizeMeters,
+    const float* detection,
+    int detectionLength,
+    const float* initialPose,
+    int initialPoseLength,
+    float* outPose,
+    int outPoseLength)
+{
+    if (width <= 0 || height <= 0 || detection == nullptr || detectionLength < kRequiredOutputLength ||
+        initialPose == nullptr || initialPoseLength < kRequiredPoseOutputLength || outPose == nullptr)
+    {
+        return false;
+    }
+
+    const auto objectPoints = CreateIppeSquareObjectPoints(tagSizeMeters);
+    std::vector<cv::Point2d> imagePoints;
+    imagePoints.reserve(4);
+    for (int pointIndex = 0; pointIndex < 4; ++pointIndex) {
+        const auto offset = 3 + pointIndex * 2;
+        imagePoints.emplace_back(
+            static_cast<double>(detection[offset]) * width,
+            static_cast<double>(detection[offset + 1]) * height);
+    }
+
+    const cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) <<
+        fx, 0.0, cx,
+        0.0, fy, cy,
+        0.0, 0.0, 1.0);
+    const cv::Mat zeroDistortion = cv::Mat::zeros(4, 1, CV_64F);
+    cv::Mat rotationMatrix = (cv::Mat_<double>(3, 3) <<
+        initialPose[3], initialPose[4], initialPose[5],
+        initialPose[6], initialPose[7], initialPose[8],
+        initialPose[9], initialPose[10], initialPose[11]);
+    cv::Mat rotationVector;
+    cv::Rodrigues(rotationMatrix, rotationVector);
+    cv::Mat translationVector = (cv::Mat_<double>(3, 1) << initialPose[0], initialPose[1], initialPose[2]);
+
+    try {
+        cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, zeroDistortion, rotationVector, translationVector);
+    }
+    catch (const cv::Exception&) {
+        return false;
+    }
+
+    return WritePoseCandidate(
+        rotationVector,
+        translationVector,
+        cameraMatrix,
+        zeroDistortion,
+        objectPoints,
+        imagePoints,
+        outPose,
+        outPoseLength);
+}
+
+bool RunPoseConventionSelfTest()
+{
+    const auto objectPoints = CreateIppeSquareObjectPoints(0.2);
+    const cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) <<
+        900.0, 0.0, 640.0,
+        0.0, 900.0, 360.0,
+        0.0, 0.0, 1.0);
+    const cv::Mat zeroDistortion = cv::Mat::zeros(4, 1, CV_64F);
+    const cv::Mat expectedRotationVector = (cv::Mat_<double>(3, 1) << 0.25, -0.15, 0.05);
+    const cv::Mat expectedTranslationVector = (cv::Mat_<double>(3, 1) << 0.03, -0.02, 0.7);
+    std::vector<cv::Point2d> imagePoints;
+    cv::projectPoints(objectPoints, expectedRotationVector, expectedTranslationVector, cameraMatrix, zeroDistortion, imagePoints);
+
+    std::vector<cv::Mat> rotations;
+    std::vector<cv::Mat> translations;
+    if (cv::solvePnPGeneric(
+            objectPoints,
+            imagePoints,
+            cameraMatrix,
+            zeroDistortion,
+            rotations,
+            translations,
+            false,
+            cv::SOLVEPNP_IPPE_SQUARE) == 0)
+    {
+        return false;
+    }
+
+    for (size_t index = 0; index < rotations.size() && index < translations.size(); ++index) {
+        const auto rmsError = ComputeReprojectionRms(
+            objectPoints,
+            imagePoints,
+            rotations[index],
+            translations[index],
+            cameraMatrix,
+            zeroDistortion);
+        if (rmsError < 0.001 && cv::norm(translations[index] - expectedTranslationVector) < 0.001)
+            return true;
+    }
+    return false;
 }
 
 bool DetectAprilTagLocked(
@@ -454,6 +609,55 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseCandidatesRgba32(
             ++candidateCount;
     }
     return candidateCount;
+}
+
+JNIEXPORT int JNICALL DJI_RefineAprilTagPoseCandidate(
+    int width,
+    int height,
+    float fx,
+    float fy,
+    float cx,
+    float cy,
+    float tagSizeMeters,
+    const float* detection,
+    int detectionLength,
+    const float* initialPose,
+    int initialPoseLength,
+    float* outPose,
+    int outPoseLength)
+{
+    ResetPoseCandidateOutput(outPose, outPoseLength);
+    if (width <= 0 || height <= 0 || detection == nullptr || detectionLength < kRequiredOutputLength ||
+        initialPose == nullptr || initialPoseLength < kRequiredPoseOutputLength || outPose == nullptr ||
+        outPoseLength < kPoseCandidateStride || !std::isfinite(fx) || !std::isfinite(fy) ||
+        !std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(tagSizeMeters) ||
+        fx <= 0.0f || fy <= 0.0f || tagSizeMeters <= 0.0f)
+    {
+        return 0;
+    }
+
+    return RefineAprilTagPoseCandidate(
+        width,
+        height,
+        fx,
+        fy,
+        cx,
+        cy,
+        tagSizeMeters,
+        detection,
+        detectionLength,
+        initialPose,
+        initialPoseLength,
+        outPose,
+        outPoseLength) ? 1 : 0;
+}
+
+JNIEXPORT int JNICALL DJI_ValidateAprilTagPoseConvention()
+{
+    std::call_once(g_poseConventionSelfTestOnce, [] {
+        g_poseConventionSelfTestPassed = RunPoseConventionSelfTest();
+    });
+    return g_poseConventionSelfTestPassed ? 1 : 0;
 }
 
 } // extern "C"
