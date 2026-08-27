@@ -9,13 +9,6 @@
 #include <float.h>
 
 
-typedef struct matd_12 { int nrows, ncols; double data[12]; } matd_12_t;
-typedef struct matd_9 { int nrows, ncols; double data[9]; } matd_9_t;
-typedef struct matd_8 { int nrows, ncols; double data[8]; } matd_8_t;
-typedef struct matd_6 { int nrows, ncols; double data[6]; } matd_6_t;
-typedef struct matd_3 { int nrows, ncols; double data[3]; } matd_3_t;
-
-
 matd_t* cross_mat(const double v[3]) {
 
     matd_t* X = matd_create(3, 3);
@@ -53,6 +46,13 @@ matd_t* wrap_vec3(const double v[3]) {
 
 void polar_decomp(const double rvec[3], double k[3], double* theta) {
     *theta = sqrt(rvec[0]*rvec[0] + rvec[1]*rvec[1] + rvec[2]*rvec[2]);
+    if (*theta <= DBL_EPSILON) {
+        k[0] = 0;
+        k[1] = 0;
+        k[2] = 0;
+        return;
+    }
+
     for (int i=0; i<3; ++i) {
         k[i] = rvec[i] / *theta;
     }
@@ -62,6 +62,8 @@ matd_t* rvec_to_matrix(const double rvec[3]) {
 
     double k[3], theta;
     polar_decomp(rvec, k, &theta);
+    if (theta <= DBL_EPSILON)
+        return matd_identity(3);
 
     double s = sin(theta);
     double c = cos(theta);
@@ -97,6 +99,25 @@ void rotate_vector(const double rvec[3],
     double k[3], theta;
     polar_decomp(rvec, k, &theta);
 
+    if (theta <= DBL_EPSILON) {
+        if (Rv) {
+            Rv[0] = v[0];
+            Rv[1] = v[1];
+            Rv[2] = v[2];
+        }
+
+        if (J) {
+            const double derivative[9] = {
+                0, v[2], -v[1],
+                -v[2], 0, v[0],
+                v[1], -v[0], 0
+            };
+            *J = matd_create_data(3, 3, derivative);
+        }
+
+        return;
+    }
+
     double s = sin(theta);
     double c = cos(theta);
 
@@ -129,9 +150,7 @@ void rotate_vector(const double rvec[3],
     double py = v[1];
     double pz = v[2];
 
-    matd_12_t Afoo = {
-        3, 4,
-        {
+    const double aData[12] = {
             
             -w*(ky*py + kz*pz),
             -kx*py*w + 2*ky*px*w + pz*s,
@@ -148,12 +167,9 @@ void rotate_vector(const double rvec[3],
             -w*(kx*px + ky*py),
             px*(-c*ky + kx*kz*s) + py*(c*kx + ky*kz*s) - pz*s*(kx*kx + ky*ky),
             
-        }
     };
 
-    matd_12_t Bfoo = {
-        4, 3, 
-        {
+    const double bData[12] = {
             (ky*ky + kz*kz)/theta,
             -kx*ky/theta,
             -kx*kz/theta,
@@ -169,13 +185,13 @@ void rotate_vector(const double rvec[3],
             kx,
             ky,
             kz,
-        }
     };
 
-    const matd_t* A = (const matd_t*)&Afoo;
-    const matd_t* B = (const matd_t*)&Bfoo;
-
-    *J = matd_multiply(A, B);
+    matd_t* a = matd_create_data(3, 4, aData);
+    matd_t* b = matd_create_data(4, 3, bData);
+    *J = matd_multiply(a, b);
+    matd_destroy(a);
+    matd_destroy(b);
 
 }
 
@@ -258,7 +274,15 @@ void rvec_from_quaternion(const double qorig[4], double rvec[3]) {
         
     }
 
-    double k = 2 * acos(q[3]) / sqrt(1 - q[3]*q[3]);
+    const double sine = sqrt(fmax(0.0, 1 - q[3]*q[3]));
+    if (sine <= DBL_EPSILON) {
+        rvec[0] = 0;
+        rvec[1] = 0;
+        rvec[2] = 0;
+        return;
+    }
+
+    double k = 2 * acos(q[3]) / sine;
 
     for (int i=0; i<3; ++i) {
         rvec[i] = k*q[i];
@@ -282,13 +306,12 @@ void project_points(double fx, double fy, double cx, double cy,
 
     if (Jptr) { *Jptr = matd_create(8, 6); }
     
-    matd_9_t dpi_dgi = {
-        3, 3, {
-            fx, 0, cx,
-            0, fy, cy,
-            0, 0, 1
-        }
+    const double cameraMatrix[9] = {
+        fx, 0, cx,
+        0, fy, cy,
+        0, 0, 1
     };
+    matd_t* dpi_dgi = matd_create_data(3, 3, cameraMatrix);
     
     for (int i=0; i<4; ++i) {
         
@@ -315,15 +338,13 @@ void project_points(double fx, double fy, double cx, double cy,
 
         if (Jptr) { 
 
-            matd_6_t dqi_dpi = {
-                2, 3, {
-                    1/pi[2], 0, -pi[0]/(pi[2]*pi[2]),
-                    0, 1/pi[2], -pi[1]/(pi[2]*pi[2])
-                }
+            const double perspectiveDerivative[6] = {
+                1/pi[2], 0, -pi[0]/(pi[2]*pi[2]),
+                0, 1/pi[2], -pi[1]/(pi[2]*pi[2])
             };
+            matd_t* dqi_dpi = matd_create_data(2, 3, perspectiveDerivative);
 
-            matd_t* dqi_dgi = matd_multiply((const matd_t*)&dqi_dpi,
-                                            (const matd_t*)&dpi_dgi);
+            matd_t* dqi_dgi = matd_multiply(dqi_dpi, dpi_dgi);
 
             // dqi_dr = dqi_dpi * dpi_dgi * dgi_dr
             //        = dqi_dgi
@@ -341,10 +362,13 @@ void project_points(double fx, double fy, double cx, double cy,
             matd_destroy(dqi_dr);
             matd_destroy(dqi_dgi);
             matd_destroy(dgi_dr);
+            matd_destroy(dqi_dpi);
             
         }
         
     }
+
+    matd_destroy(dpi_dgi);
 
 
 }
@@ -354,7 +378,7 @@ double reprojection_error(const double corners_meas[][2],
                           const matd_t* Jrt,
                           double rtgrad[6]) {
 
-    matd_8_t err = { 8, 1, { 0 } };
+    matd_t* err = matd_create(8, 1);
     double errsum = 0;
 
 
@@ -366,16 +390,18 @@ double reprojection_error(const double corners_meas[][2],
             double ei = 0.5 * (corners_reproj[i][k] - corners_meas[i][k]);
             errsum += ei * ei;
 
-            err.data[row] = ei;
+            err->data[row] = ei;
 
         }
     }
 
     if (rtgrad && Jrt) {
-        matd_t* g = matd_op("M'*M", Jrt, (const matd_t*)&err);
+        matd_t* g = matd_op("M'*M", Jrt, err);
         memcpy(rtgrad, g->data, 6*sizeof(double));
         matd_destroy(g);
     }
+
+    matd_destroy(err);
 
     return  errsum;
 
@@ -445,7 +471,7 @@ matd_t* pose_from_homography(const matd_t* H,
 
     double best_e = DBL_MAX;
     
-    matd_6_t g = { 6, 1, { 0 } };
+    matd_t* g = matd_create(6, 1);
 
 
     double best_rvec[3], best_tvec[3];
@@ -467,7 +493,7 @@ matd_t* pose_from_homography(const matd_t* H,
 
         double e = reprojection_objective(corners_meas,
                                           fx, fy, cx, cy, tagsize,
-                                          rvec, tvec, g.data,
+                                          rvec, tvec, g->data,
                                           done ? NULL : &J);
 
         //printf("objective at iter %3d is %12f\n", iter, e);
@@ -501,7 +527,7 @@ matd_t* pose_from_homography(const matd_t* H,
             MATD_EL(JTJ, i, i) += lambda;
         }
 
-        matd_t* step = matd_solve(JTJ, (matd_t*)&g);
+        matd_t* step = matd_solve(JTJ, g);
 
         double stotal = 0;
         for (int i=0; i<6; ++i) {
@@ -525,6 +551,7 @@ matd_t* pose_from_homography(const matd_t* H,
 
     if (final_error) { *final_error = best_e; }
 
+    matd_destroy(g);
     matd_destroy(M);
            
     return mat4_from_rvec_tvec(rvec, tvec);
