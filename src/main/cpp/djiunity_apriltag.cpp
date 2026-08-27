@@ -11,6 +11,7 @@ extern "C" {
 #include "apriltag.h"
 #include "common/image_u8.h"
 #include "common/homography.h"
+#include "contrib/pose.h"
 #include "tagStandard41h12.h"
 }
 
@@ -190,16 +191,33 @@ bool DetectAprilTagLocked(
     outDetection[11] = static_cast<float>(bestDetection->decision_margin);
 
     if (outPose != nullptr) {
-        matd_t* pose = homography_to_pose(bestDetection->H, fx, fy, cx, cy);
+        const double corners[4][2] = {
+            {bestDetection->p[0][0], bestDetection->p[0][1]},
+            {bestDetection->p[1][0], bestDetection->p[1][1]},
+            {bestDetection->p[2][0], bestDetection->p[2][1]},
+            {bestDetection->p[3][0], bestDetection->p[3][1]},
+        };
+        double initialError = 0.0;
+        double finalError = 0.0;
+        matd_t* pose = pose_from_homography(
+            bestDetection->H,
+            fx,
+            fy,
+            cx,
+            cy,
+            tagSizeMeters,
+            1.0,
+            corners,
+            &initialError,
+            &finalError);
         if (pose == nullptr) {
             apriltag_detections_destroy(detections);
             return false;
         }
 
-        const auto tagHalfSizeMeters = tagSizeMeters * 0.5;
-        outPose[0] = static_cast<float>(MATD_EL(pose, 0, 3) * tagHalfSizeMeters);
-        outPose[1] = static_cast<float>(MATD_EL(pose, 1, 3) * tagHalfSizeMeters);
-        outPose[2] = static_cast<float>(MATD_EL(pose, 2, 3) * tagHalfSizeMeters);
+        outPose[0] = static_cast<float>(MATD_EL(pose, 0, 3));
+        outPose[1] = static_cast<float>(MATD_EL(pose, 1, 3));
+        outPose[2] = static_cast<float>(MATD_EL(pose, 2, 3));
         for (int row = 0; row < 3; ++row) {
             for (int column = 0; column < 3; ++column)
                 outPose[3 + row * 3 + column] = static_cast<float>(MATD_EL(pose, row, column));

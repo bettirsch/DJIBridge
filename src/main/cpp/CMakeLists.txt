@@ -15,6 +15,7 @@ add_library(djiunity SHARED
         djiunity_apriltag.cpp
         apriltag/apriltag.c
         apriltag/apriltag_quad_thresh.c
+        apriltag/contrib/pose.c
         apriltag/tagStandard41h12.c
         ${APRILTAG_COMMON_SRC}
 )
@@ -22,6 +23,7 @@ add_library(djiunity SHARED
 target_include_directories(djiunity PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/apriltag
         ${CMAKE_CURRENT_SOURCE_DIR}/apriltag/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/apriltag/contrib
 )
 
 find_library(log-lib log)
