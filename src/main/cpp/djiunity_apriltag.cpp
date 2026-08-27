@@ -201,23 +201,13 @@ int SolveAprilTagPoseCandidates(
 
     auto candidateCount = 0;
     for (size_t index = 0; index < rotationVectors.size() && index < translationVectors.size(); ++index) {
-        auto rotationVector = rotationVectors[index].clone();
-        auto translationVector = translationVectors[index].clone();
+        // Keep IPPE's two hypotheses intact. Refining both candidates independently
+        // can pull them into different local minima and makes the Unity-side
+        // temporal selector unable to reason about the planar ambiguity.
+        const auto& rotationVector = rotationVectors[index];
+        const auto& translationVector = translationVectors[index];
         if (rotationVector.empty() || translationVector.empty() ||
             !IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
-            translationVector.at<double>(2, 0) <= 0.0)
-        {
-            continue;
-        }
-
-        try {
-            cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, zeroDistortion, rotationVector, translationVector);
-        }
-        catch (const cv::Exception&) {
-            continue;
-        }
-
-        if (!IsFiniteMatrix(rotationVector) || !IsFiniteMatrix(translationVector) ||
             translationVector.at<double>(2, 0) <= 0.0)
         {
             continue;
