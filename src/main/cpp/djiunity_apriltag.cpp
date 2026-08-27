@@ -42,22 +42,6 @@ apriltag_family_t* g_family = nullptr;
 std::vector<uint8_t> g_grayscaleBuffer;
 int g_targetTagId = 0;
 
-struct PoseHistory
-{
-    cv::Mat rotationMatrix;
-    cv::Mat translationVector;
-    bool valid = false;
-};
-
-PoseHistory g_poseHistory;
-
-void ClearPoseHistory()
-{
-    g_poseHistory.rotationMatrix.release();
-    g_poseHistory.translationVector.release();
-    g_poseHistory.valid = false;
-}
-
 void ResetOutput(float* outDetection, int outDetectionLength)
 {
     if (outDetection == nullptr || outDetectionLength <= 0)
@@ -88,7 +72,6 @@ void ReleaseDetectorLocked()
     }
 
     g_grayscaleBuffer.clear();
-    ClearPoseHistory();
 }
 
 bool EnsureDetectorLocked()
@@ -146,22 +129,6 @@ bool IsFiniteMatrix(const cv::Mat& matrix)
     return true;
 }
 
-double ComputeContinuityPenalty(const cv::Mat& rotationMatrix, const cv::Mat& translationVector)
-{
-    if (!g_poseHistory.valid)
-        return 0.0;
-
-    const cv::Mat relativeRotation = rotationMatrix * g_poseHistory.rotationMatrix.t();
-    const auto cosine = std::clamp((cv::trace(relativeRotation)[0] - 1.0) * 0.5, -1.0, 1.0);
-    const auto rotationDeltaRadians = std::acos(cosine);
-    const auto previousRange = std::max(0.15, cv::norm(g_poseHistory.translationVector));
-    const auto relativeTranslation = cv::norm(translationVector - g_poseHistory.translationVector) / previousRange;
-
-    // IPPE returns two planar solutions. Near a front-facing view their reprojection
-    // errors can be almost identical, so prefer the physically continuous one.
-    return rotationDeltaRadians * 2.5 + relativeTranslation * 0.75;
-}
-
 bool SolveAprilTagPose(
     const apriltag_detection_t* detection,
     double fx,
@@ -215,9 +182,8 @@ bool SolveAprilTagPose(
         return false;
     }
 
-    auto bestScore = DBL_MAX;
     auto bestError = DBL_MAX;
-    cv::Mat bestRotationMatrix;
+    cv::Mat bestRotation;
     cv::Mat bestTranslation;
     for (size_t index = 0; index < rotationVectors.size() && index < translationVectors.size(); ++index) {
         const auto& rotationVector = rotationVectors[index];
@@ -240,37 +206,28 @@ bool SolveAprilTagPose(
             squaredError += delta.dot(delta);
         }
         const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
-        cv::Mat rotationMatrix;
-        cv::Rodrigues(rotationVector, rotationMatrix);
-        if (!IsFiniteMatrix(rotationMatrix))
-            continue;
-
-        const auto score = rmsError + ComputeContinuityPenalty(rotationMatrix, translationVector);
-        if (std::isfinite(score) && score < bestScore) {
-            bestScore = score;
+        if (std::isfinite(rmsError) && rmsError < bestError) {
             bestError = rmsError;
-            bestRotationMatrix = rotationMatrix;
+            bestRotation = rotationVector;
             bestTranslation = translationVector;
         }
     }
 
     // Reject a numerically valid but geometrically implausible fit.
-    if (bestRotationMatrix.empty() || bestTranslation.empty() || bestError > 6.0)
+    if (bestRotation.empty() || bestTranslation.empty() || bestError > 6.0)
         return false;
 
-    if (!IsFiniteMatrix(bestRotationMatrix) || !IsFiniteMatrix(bestTranslation))
+    cv::Mat rotationMatrix;
+    cv::Rodrigues(bestRotation, rotationMatrix);
+    if (!IsFiniteMatrix(rotationMatrix) || !IsFiniteMatrix(bestTranslation))
         return false;
-
-    g_poseHistory.rotationMatrix = bestRotationMatrix.clone();
-    g_poseHistory.translationVector = bestTranslation.clone();
-    g_poseHistory.valid = true;
 
     outPose[0] = static_cast<float>(bestTranslation.at<double>(0, 0));
     outPose[1] = static_cast<float>(bestTranslation.at<double>(1, 0));
     outPose[2] = static_cast<float>(bestTranslation.at<double>(2, 0));
     for (int row = 0; row < 3; ++row) {
         for (int column = 0; column < 3; ++column)
-            outPose[3 + row * 3 + column] = static_cast<float>(bestRotationMatrix.at<double>(row, column));
+            outPose[3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
     }
     return true;
 }
@@ -331,7 +288,6 @@ bool DetectAprilTagLocked(
     }
 
     if (bestDetection == nullptr) {
-        ClearPoseHistory();
         apriltag_detections_destroy(detections);
         return false;
     }
@@ -355,9 +311,6 @@ bool DetectAprilTagLocked(
             return false;
         }
     }
-    else {
-        ClearPoseHistory();
-    }
 
     apriltag_detections_destroy(detections);
     return true;
@@ -370,7 +323,6 @@ JNIEXPORT void JNICALL DJI_SetAprilTagTargetId(int tagId)
 {
     std::lock_guard<std::mutex> lock(g_detectorMutex);
     g_targetTagId = tagId;
-    ClearPoseHistory();
     APRILTAG_LOGI("AprilTag target id updated to %d.", g_targetTagId);
 }
 
