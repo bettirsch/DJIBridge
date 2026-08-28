@@ -145,8 +145,77 @@ bool IsFiniteMatrix(const cv::Mat& matrix)
     return true;
 }
 
+void LogPoseCandidateDiagnostics(
+    int candidateIndex,
+    const cv::Mat& rotationVector,
+    const cv::Mat& translationVector,
+    const cv::Mat& rotationMatrix,
+    const cv::Mat& cameraMatrix,
+    const cv::Mat& distortion,
+    double tagSizeMeters,
+    double rmsError,
+    bool accepted)
+{
+    const cv::Vec3d translation(
+        translationVector.at<double>(0, 0),
+        translationVector.at<double>(1, 0),
+        translationVector.at<double>(2, 0));
+    const cv::Vec3d right(rotationMatrix.at<double>(0, 0), rotationMatrix.at<double>(1, 0), rotationMatrix.at<double>(2, 0));
+    const cv::Vec3d down(rotationMatrix.at<double>(0, 1), rotationMatrix.at<double>(1, 1), rotationMatrix.at<double>(2, 1));
+    const cv::Vec3d normal(rotationMatrix.at<double>(0, 2), rotationMatrix.at<double>(1, 2), rotationMatrix.at<double>(2, 2));
+    const auto translationLength = cv::norm(translation);
+    const auto viewDirection = translationLength > DBL_EPSILON ? -translation / translationLength : cv::Vec3d(0.0, 0.0, 0.0);
+
+    // Log the raw OpenCV coordinate system before any Unity handedness conversion.
+    APRILTAG_LOGI(
+        "PnP candidate=%d accepted=%d rms=%.4f t=(%.5f,%.5f,%.5f) viewDir=(-t)=(%.5f,%.5f,%.5f)",
+        candidateIndex, accepted ? 1 : 0, rmsError,
+        translation[0], translation[1], translation[2],
+        viewDirection[0], viewDirection[1], viewDirection[2]);
+    APRILTAG_LOGI(
+        "PnP candidate=%d R.columns right=(%.5f,%.5f,%.5f) down=(%.5f,%.5f,%.5f) normal=(%.5f,%.5f,%.5f)",
+        candidateIndex,
+        right[0], right[1], right[2],
+        down[0], down[1], down[2],
+        normal[0], normal[1], normal[2]);
+    APRILTAG_LOGI(
+        "PnP candidate=%d basis dots RD=%.6f RN=%.6f DN=%.6f lengths R=%.6f D=%.6f N=%.6f normal.viewDir=%.6f",
+        candidateIndex,
+        right.dot(down), right.dot(normal), down.dot(normal),
+        cv::norm(right), cv::norm(down), cv::norm(normal), normal.dot(viewDirection));
+
+    const auto axisLength = tagSizeMeters * 0.5;
+    const std::vector<cv::Point3d> axisPoints = {
+        {0.0, 0.0, 0.0},
+        {axisLength, 0.0, 0.0},
+        {0.0, axisLength, 0.0},
+        {0.0, 0.0, axisLength},
+    };
+    std::vector<cv::Point2d> projectedAxisPoints;
+    try {
+        cv::projectPoints(axisPoints, rotationVector, translationVector, cameraMatrix, distortion, projectedAxisPoints);
+    }
+    catch (const cv::Exception&) {
+        APRILTAG_LOGW("PnP candidate=%d could not project diagnostic axes.", candidateIndex);
+        return;
+    }
+
+    if (projectedAxisPoints.size() == axisPoints.size()) {
+        APRILTAG_LOGI(
+            "PnP candidate=%d projected axes px O=(%.1f,%.1f) X=(%.1f,%.1f) Y=(%.1f,%.1f) Z=(%.1f,%.1f) axisLength=%.4fm",
+            candidateIndex,
+            projectedAxisPoints[0].x, projectedAxisPoints[0].y,
+            projectedAxisPoints[1].x, projectedAxisPoints[1].y,
+            projectedAxisPoints[2].x, projectedAxisPoints[2].y,
+            projectedAxisPoints[3].x, projectedAxisPoints[3].y,
+            axisLength);
+    }
+}
+
 int SolveAprilTagPoseCandidates(
     const apriltag_detection_t* detection,
+    int imageWidth,
+    int imageHeight,
     double fx,
     double fy,
     double cx,
@@ -178,6 +247,13 @@ int SolveAprilTagPoseCandidates(
         0.0, fy, cy,
         0.0, 0.0, 1.0);
     const cv::Mat zeroDistortion = cv::Mat::zeros(4, 1, CV_64F);
+    APRILTAG_LOGI(
+        "PnP input image=%dx%d intrinsics fx=%.3f fy=%.3f cx=%.3f cy=%.3f tagSize=%.4fm corners px=[(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f)]",
+        imageWidth, imageHeight, fx, fy, cx, cy, tagSizeMeters,
+        imagePoints[0].x, imagePoints[0].y,
+        imagePoints[1].x, imagePoints[1].y,
+        imagePoints[2].x, imagePoints[2].y,
+        imagePoints[3].x, imagePoints[3].y);
     std::vector<cv::Mat> rotationVectors;
     std::vector<cv::Mat> translationVectors;
 
@@ -194,6 +270,7 @@ int SolveAprilTagPoseCandidates(
         {
             return 0;
         }
+        APRILTAG_LOGI("PnP IPPE returned %zu raw candidate(s).", rotationVectors.size());
     }
     catch (const cv::Exception&) {
         return 0;
@@ -237,15 +314,18 @@ int SolveAprilTagPoseCandidates(
             squaredError += delta.dot(delta);
         }
         const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
-        if (!std::isfinite(rmsError) || rmsError > 12.0 || candidateCount >= kMaximumPoseCandidates ||
-            (candidateCount + 1) * kPoseCandidateStride > outPoseCandidatesLength)
-        {
-            continue;
-        }
-
         cv::Mat rotationMatrix;
         cv::Rodrigues(rotationVector, rotationMatrix);
         if (!IsFiniteMatrix(rotationMatrix))
+            continue;
+
+        const auto accepted = std::isfinite(rmsError) && rmsError <= 12.0 &&
+                              candidateCount < kMaximumPoseCandidates &&
+                              (candidateCount + 1) * kPoseCandidateStride <= outPoseCandidatesLength;
+        LogPoseCandidateDiagnostics(
+            static_cast<int>(index), rotationVector, translationVector, rotationMatrix,
+            cameraMatrix, zeroDistortion, tagSizeMeters, rmsError, accepted);
+        if (!accepted)
             continue;
 
         const auto outputOffset = candidateCount * kPoseCandidateStride;
@@ -342,7 +422,7 @@ bool DetectAprilTagLocked(
         auto* poseCandidates = outPoseCandidates != nullptr ? outPoseCandidates : legacyPoseCandidates;
         const auto poseCandidatesLength = outPoseCandidates != nullptr ? outPoseCandidatesLength : kRequiredPoseCandidateOutputLength;
         const auto poseCandidateCount = SolveAprilTagPoseCandidates(
-            bestDetection, fx, fy, cx, cy, tagSizeMeters, poseCandidates, poseCandidatesLength);
+            bestDetection, width, height, fx, fy, cx, cy, tagSizeMeters, poseCandidates, poseCandidatesLength);
         if (poseCandidateCount <= 0) {
             apriltag_detections_destroy(detections);
             return false;
