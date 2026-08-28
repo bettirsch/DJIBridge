@@ -17,6 +17,7 @@ add_library(djiunity SHARED
         djiunity.cpp
         djiunity_apriltag.cpp
         apriltag/apriltag.c
+        apriltag/apriltag_pose.c
         apriltag/apriltag_quad_thresh.c
         apriltag/tagStandard41h12.c
         ${APRILTAG_COMMON_SRC}
