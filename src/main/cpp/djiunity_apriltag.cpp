@@ -235,14 +235,11 @@ int SolveAprilTagPoseCandidates(
         {halfTagSize, -halfTagSize, 0.0},
         {-halfTagSize, -halfTagSize, 0.0},
     };
-    // AprilTag stores its corners as top-left, bottom-left, bottom-right,
-    // top-right in image coordinates. IPPE_SQUARE requires the same winding
-    // as objectPoints: top-left, top-right, bottom-right, bottom-left.
     const std::vector<cv::Point2d> imagePoints = {
         {detection->p[0][0], detection->p[0][1]},
-        {detection->p[3][0], detection->p[3][1]},
-        {detection->p[2][0], detection->p[2][1]},
         {detection->p[1][0], detection->p[1][1]},
+        {detection->p[2][0], detection->p[2][1]},
+        {detection->p[3][0], detection->p[3][1]},
     };
 
     const cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) <<
