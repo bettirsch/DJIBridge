@@ -34,11 +34,15 @@ constexpr int kNoTargetTagId = -1;
 constexpr int kRequiredOutputLength = 12;
 constexpr int kRequiredPoseOutputLength = 12;
 constexpr int kMaximumPoseCandidates = 2;
-constexpr int kPoseCandidateStride = 13;
+constexpr int kPoseCandidateStride = 16;
+constexpr int kReprojectionRmsOffset = kRequiredPoseOutputLength;
+constexpr int kMaximumCornerResidualOffset = kRequiredPoseOutputLength + 1;
+constexpr int kTagPixelSizeOffset = kRequiredPoseOutputLength + 2;
+constexpr int kFrontoParallelCosineOffset = kRequiredPoseOutputLength + 3;
 constexpr int kRequiredPoseCandidateOutputLength = kMaximumPoseCandidates * kPoseCandidateStride;
 constexpr int kOfficialPoseIterations = 50;
 constexpr int kDetectorThreads = 2;
-constexpr float kQuadDecimate = 2.0f;
+constexpr float kQuadDecimate = 1.0f;
 constexpr float kDecodeSharpening = 0.25f;
 
 std::mutex g_detectorMutex;
@@ -71,9 +75,15 @@ void ResetPoseCandidateOutput(float* outPoseCandidates, int outPoseCandidatesLen
 
     std::fill(outPoseCandidates, outPoseCandidates + outPoseCandidatesLength, 0.0f);
     for (int candidateIndex = 0; candidateIndex < kMaximumPoseCandidates; ++candidateIndex) {
-        const auto errorOffset = candidateIndex * kPoseCandidateStride + kRequiredPoseOutputLength;
+        const auto outputOffset = candidateIndex * kPoseCandidateStride;
+        const auto errorOffset = outputOffset + kReprojectionRmsOffset;
         if (errorOffset < outPoseCandidatesLength)
             outPoseCandidates[errorOffset] = FLT_MAX;
+        for (int metricOffset = kMaximumCornerResidualOffset;
+             metricOffset < kPoseCandidateStride && outputOffset + metricOffset < outPoseCandidatesLength;
+             ++metricOffset) {
+            outPoseCandidates[outputOffset + metricOffset] = NAN;
+        }
     }
 }
 
@@ -111,10 +121,13 @@ bool EnsureDetectorLocked()
     g_detector->nthreads = kDetectorThreads;
     g_detector->quad_decimate = kQuadDecimate;
     g_detector->quad_sigma = 0.0f;
+    g_detector->refine_edges = true;
     g_detector->decode_sharpening = kDecodeSharpening;
     g_detector->debug = 0;
 
-    APRILTAG_LOGI("AprilTag detector ready (family=tagStandard41h12 targetId=%d).", g_targetTagId);
+    APRILTAG_LOGI(
+        "AprilTag detector ready (family=tagStandard41h12 targetId=%d quadDecimate=%.1f refineEdges=%d).",
+        g_targetTagId, kQuadDecimate, g_detector->refine_edges ? 1 : 0);
     return true;
 }
 
@@ -182,7 +195,7 @@ int GetLowestErrorCandidateIndex(const float* poseCandidates, int poseCandidates
     auto selectedCandidateIndex = -1;
     auto lowestError = FLT_MAX;
     for (int candidateIndex = 0; candidateIndex < kMaximumPoseCandidates; ++candidateIndex) {
-        const auto errorOffset = candidateIndex * kPoseCandidateStride + kRequiredPoseOutputLength;
+        const auto errorOffset = candidateIndex * kPoseCandidateStride + kReprojectionRmsOffset;
         if (errorOffset >= poseCandidatesLength)
             break;
 
@@ -209,6 +222,9 @@ void LogPoseCandidateDiagnostics(
     const std::vector<cv::Point2d>& detectedCorners,
     const std::vector<cv::Point2d>& reprojectedCorners,
     double rmsError,
+    double maximumCornerError,
+    double tagPixelSize,
+    double frontoParallelCosine,
     bool accepted)
 {
     const cv::Vec3d translation(
@@ -248,17 +264,30 @@ void LogPoseCandidateDiagnostics(
                                        cameraMatrix.at<double>(1, 2) <= static_cast<double>(imageHeight);
     APRILTAG_LOGI(
         "Image-space reprojection candidate=%d coordinateFrame=detectorRGBA32 image=%dx%d K=(fx=%.3f,fy=%.3f,cx=%.3f,cy=%.3f) "
-        "detectedCornersAndProjectedCornersUseSamePixels=1 principalPointInBounds=%d distortion=zero",
+        "detectedCornersAndProjectedCornersUseSamePixels=1 principalPointInBounds=%d distortion=[%.6f,%.6f,%.6f,%.6f,%.6f]",
         candidateIndex, imageWidth, imageHeight,
         cameraMatrix.at<double>(0, 0), cameraMatrix.at<double>(1, 1),
         cameraMatrix.at<double>(0, 2), cameraMatrix.at<double>(1, 2),
-        principalPointInBounds ? 1 : 0);
+        principalPointInBounds ? 1 : 0,
+        distortion.at<double>(0, 0), distortion.at<double>(1, 0), distortion.at<double>(2, 0),
+        distortion.at<double>(3, 0), distortion.at<double>(4, 0));
     if (detectedCorners.size() == reprojectedCorners.size()) {
-        auto maximumCornerError = 0.0;
+        cv::Point2d meanResidual(0.0, 0.0);
+        auto radialResidual = 0.0;
+        auto tangentialResidual = 0.0;
+        auto validPrincipalPointDirections = 0;
         for (size_t cornerIndex = 0; cornerIndex < detectedCorners.size(); ++cornerIndex) {
             const auto delta = reprojectedCorners[cornerIndex] - detectedCorners[cornerIndex];
             const auto error = cv::norm(delta);
-            maximumCornerError = std::max(maximumCornerError, error);
+            meanResidual += delta;
+            const auto cornerOffset = detectedCorners[cornerIndex] - cv::Point2d(cameraMatrix.at<double>(0, 2), cameraMatrix.at<double>(1, 2));
+            const auto cornerRadius = cv::norm(cornerOffset);
+            if (cornerRadius > DBL_EPSILON) {
+                const auto radial = cornerOffset / cornerRadius;
+                radialResidual += delta.dot(radial);
+                tangentialResidual += delta.dot(cv::Point2d(-radial.y, radial.x));
+                ++validPrincipalPointDirections;
+            }
             APRILTAG_LOGI(
                 "Image-space reprojection candidate=%d corner=%zu detected=(%.3f,%.3f) projected=(%.3f,%.3f) delta=(%.3f,%.3f) errorPx=%.4f",
                 candidateIndex, cornerIndex,
@@ -266,9 +295,26 @@ void LogPoseCandidateDiagnostics(
                 reprojectedCorners[cornerIndex].x, reprojectedCorners[cornerIndex].y,
                 delta.x, delta.y, error);
         }
+        meanResidual *= 1.0 / static_cast<double>(detectedCorners.size());
+        if (validPrincipalPointDirections > 0) {
+            radialResidual /= static_cast<double>(validPrincipalPointDirections);
+            tangentialResidual /= static_cast<double>(validPrincipalPointDirections);
+        }
+        const auto residualPattern = std::abs(radialResidual) > std::abs(tangentialResidual) * 1.5 && std::abs(radialResidual) > 0.5
+            ? "radial-or-focal-model"
+            : cv::norm(meanResidual) > 0.75
+                ? "principal-point-or-crop-offset"
+                : std::abs(tangentialResidual) > 0.5
+                    ? "tangential-or-corner-order"
+                    : "mixed-or-corner-noise";
+        const auto tagCenter = (detectedCorners[0] + detectedCorners[1] + detectedCorners[2] + detectedCorners[3]) * 0.25;
+        const auto tagCenterDistance = cv::norm(tagCenter - cv::Point2d(cameraMatrix.at<double>(0, 2), cameraMatrix.at<double>(1, 2)));
         APRILTAG_LOGI(
-            "Image-space reprojection candidate=%d rmsErrorPx=%.4f maximumCornerErrorPx=%.4f.",
-            candidateIndex, rmsError, maximumCornerError);
+            "Image-space reprojection candidate=%d rmsErrorPx=%.4f maximumCornerErrorPx=%.4f tagPixelSize=%.3f "
+            "tagCenterDistanceFromPrincipalPointPx=%.3f frontoParallelCosine=%.6f meanResidual=(%.4f,%.4f) "
+            "radialResidual=%.4f tangentialResidual=%.4f residualPattern=%s.",
+            candidateIndex, rmsError, maximumCornerError, tagPixelSize, tagCenterDistance, frontoParallelCosine,
+            meanResidual.x, meanResidual.y, radialResidual, tangentialResidual, residualPattern);
     }
 
     const auto axisLength = tagSizeMeters * 0.5;
@@ -308,6 +354,8 @@ int SolveAprilTagPoseCandidates(
     double cx,
     double cy,
     double tagSizeMeters,
+    const float* distortionCoefficients,
+    int distortionCoefficientsLength,
     float* outPoseCandidates,
     int outPoseCandidatesLength)
 {
@@ -333,9 +381,20 @@ int SolveAprilTagPoseCandidates(
         fx, 0.0, cx,
         0.0, fy, cy,
         0.0, 0.0, 1.0);
-    const cv::Mat zeroDistortion = cv::Mat::zeros(4, 1, CV_64F);
+    cv::Mat distortion = cv::Mat::zeros(5, 1, CV_64F);
+    if (distortionCoefficients != nullptr && distortionCoefficientsLength == 5) {
+        for (int index = 0; index < distortionCoefficientsLength; ++index) {
+            if (!std::isfinite(distortionCoefficients[index])) {
+                APRILTAG_LOGW("PnP rejected non-finite distortion coefficient index=%d.", index);
+                return 0;
+            }
+            distortion.at<double>(index, 0) = distortionCoefficients[index];
+        }
+    }
     APRILTAG_LOGI(
-        "PnP input image=%dx%d intrinsics fx=%.3f fy=%.3f cx=%.3f cy=%.3f tagSize=%.4fm corners px=[(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f)]",
+        "PnP input image=%dx%d intrinsics fx=%.3f fy=%.3f cx=%.3f cy=%.3f tagSize=%.4fm "
+        "objectCorners=[(-,+),(+,+),(+,-),(-,-)] detectionCorners=AprilTagH[-,+],[+,+],[+,-],[-,-] "
+        "corners px=[(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f),(%.1f,%.1f)]",
         imageWidth, imageHeight, fx, fy, cx, cy, tagSizeMeters,
         imagePoints[0].x, imagePoints[0].y,
         imagePoints[1].x, imagePoints[1].y,
@@ -349,7 +408,7 @@ int SolveAprilTagPoseCandidates(
                 objectPoints,
                 imagePoints,
                 cameraMatrix,
-                zeroDistortion,
+                distortion,
                 rotationVectors,
                 translationVectors,
                 false,
@@ -378,7 +437,7 @@ int SolveAprilTagPoseCandidates(
         }
 
         try {
-            cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, zeroDistortion, rotationVector, translationVector);
+            cv::solvePnPRefineLM(objectPoints, imagePoints, cameraMatrix, distortion, rotationVector, translationVector);
         }
         catch (const cv::Exception&) {
             continue;
@@ -391,14 +450,16 @@ int SolveAprilTagPoseCandidates(
         }
 
         std::vector<cv::Point2d> reprojectedPoints;
-        cv::projectPoints(objectPoints, rotationVector, translationVector, cameraMatrix, zeroDistortion, reprojectedPoints);
+        cv::projectPoints(objectPoints, rotationVector, translationVector, cameraMatrix, distortion, reprojectedPoints);
         if (reprojectedPoints.size() != imagePoints.size())
             continue;
 
         auto squaredError = 0.0;
+        auto maximumCornerError = 0.0;
         for (size_t pointIndex = 0; pointIndex < imagePoints.size(); ++pointIndex) {
             const auto delta = reprojectedPoints[pointIndex] - imagePoints[pointIndex];
             squaredError += delta.dot(delta);
+            maximumCornerError = std::max(maximumCornerError, cv::norm(delta));
         }
         const auto rmsError = std::sqrt(squaredError / static_cast<double>(imagePoints.size()));
         cv::Mat rotationMatrix;
@@ -406,13 +467,26 @@ int SolveAprilTagPoseCandidates(
         if (!IsFiniteMatrix(rotationMatrix))
             continue;
 
+        auto tagPixelSize = 0.0;
+        for (size_t pointIndex = 0; pointIndex < imagePoints.size(); ++pointIndex)
+            tagPixelSize += cv::norm(imagePoints[(pointIndex + 1) % imagePoints.size()] - imagePoints[pointIndex]);
+        tagPixelSize /= static_cast<double>(imagePoints.size());
+        const auto normal = cv::Vec3d(rotationMatrix.at<double>(0, 2), rotationMatrix.at<double>(1, 2), rotationMatrix.at<double>(2, 2));
+        const auto translationLength = cv::norm(translationVector);
+        const auto frontoParallelCosine = translationLength > DBL_EPSILON
+            ? std::abs(normal.dot(-cv::Vec3d(
+                translationVector.at<double>(0, 0),
+                translationVector.at<double>(1, 0),
+                translationVector.at<double>(2, 0)) / translationLength))
+            : 0.0;
+
         const auto accepted = std::isfinite(rmsError) && rmsError <= 12.0 &&
                               candidateCount < kMaximumPoseCandidates &&
                               (candidateCount + 1) * kPoseCandidateStride <= outPoseCandidatesLength;
         LogPoseCandidateDiagnostics(
             static_cast<int>(index), rotationVector, translationVector, rotationMatrix,
-            cameraMatrix, zeroDistortion, imageWidth, imageHeight, tagSizeMeters,
-            imagePoints, reprojectedPoints, rmsError, accepted);
+            cameraMatrix, distortion, imageWidth, imageHeight, tagSizeMeters,
+            imagePoints, reprojectedPoints, rmsError, maximumCornerError, tagPixelSize, frontoParallelCosine, accepted);
         if (!accepted)
             continue;
 
@@ -425,6 +499,9 @@ int SolveAprilTagPoseCandidates(
                 outPoseCandidates[outputOffset + 3 + row * 3 + column] = static_cast<float>(rotationMatrix.at<double>(row, column));
         }
         outPoseCandidates[outputOffset + kRequiredPoseOutputLength] = static_cast<float>(rmsError);
+        outPoseCandidates[outputOffset + kMaximumCornerResidualOffset] = static_cast<float>(maximumCornerError);
+        outPoseCandidates[outputOffset + kTagPixelSizeOffset] = static_cast<float>(tagPixelSize);
+        outPoseCandidates[outputOffset + kFrontoParallelCosineOffset] = static_cast<float>(frontoParallelCosine);
         ++candidateCount;
     }
 
@@ -555,7 +632,9 @@ bool DetectAprilTagLocked(
     double fy,
     double cx,
     double cy,
-    double tagSizeMeters)
+    double tagSizeMeters,
+    const float* distortionCoefficients,
+    int distortionCoefficientsLength)
 {
     const auto pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     g_grayscaleBuffer.resize(pixelCount);
@@ -625,7 +704,8 @@ bool DetectAprilTagLocked(
         auto* poseCandidates = outPoseCandidates != nullptr ? outPoseCandidates : legacyPoseCandidates;
         const auto poseCandidatesLength = outPoseCandidates != nullptr ? outPoseCandidatesLength : kRequiredPoseCandidateOutputLength;
         const auto poseCandidateCount = SolveAprilTagPoseCandidates(
-            bestDetection, width, height, fx, fy, cx, cy, tagSizeMeters, poseCandidates, poseCandidatesLength);
+            bestDetection, width, height, fx, fy, cx, cy, tagSizeMeters,
+            distortionCoefficients, distortionCoefficientsLength, poseCandidates, poseCandidatesLength);
         hasOpenCvPose = poseCandidateCount > 0;
 
         if (hasOpenCvPose && outPose != nullptr)
@@ -675,7 +755,7 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagRgba32(
     if (!EnsureDetectorLocked())
         return 0;
 
-    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, nullptr, nullptr, 0, nullptr, 0, 0.0, 0.0, 0.0, 0.0, 0.0) ? 1 : 0;
+    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, nullptr, nullptr, 0, nullptr, 0, 0.0, 0.0, 0.0, 0.0, 0.0, nullptr, 0) ? 1 : 0;
 }
 
 JNIEXPORT int JNICALL DJI_DetectAprilTagPoseRgba32(
@@ -704,7 +784,7 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseRgba32(
     if (!EnsureDetectorLocked())
         return 0;
 
-    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, outPose, nullptr, 0, nullptr, 0, fx, fy, cx, cy, tagSizeMeters) ? 1 : 0;
+    return DetectAprilTagLocked(rgbaBytes, width, height, outDetection, outPose, nullptr, 0, nullptr, 0, fx, fy, cx, cy, tagSizeMeters, nullptr, 0) ? 1 : 0;
 }
 
 JNIEXPORT int JNICALL DJI_DetectAprilTagPoseCandidatesRgba32(
@@ -737,7 +817,7 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseCandidatesRgba32(
 
     DetectAprilTagLocked(
         rgbaBytes, width, height, outDetection, nullptr, outPoseCandidates, outPoseCandidatesLength,
-        nullptr, 0, fx, fy, cx, cy, tagSizeMeters);
+        nullptr, 0, fx, fy, cx, cy, tagSizeMeters, nullptr, 0);
     auto candidateCount = 0;
     for (int candidateIndex = 0; candidateIndex < kMaximumPoseCandidates; ++candidateIndex) {
         if (outPoseCandidates[candidateIndex * kPoseCandidateStride + kRequiredPoseOutputLength] < FLT_MAX)
@@ -755,6 +835,8 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseComparisonRgba32(
     float cx,
     float cy,
     float tagSizeMeters,
+    const float* distortionCoefficients,
+    int distortionCoefficientsLength,
     float* outDetection,
     int outDetectionLength,
     float* outOpenCvPoseCandidates,
@@ -771,7 +853,8 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseComparisonRgba32(
         outOpenCvPoseCandidatesLength < kRequiredPoseCandidateOutputLength ||
         outOfficialPoseCandidates == nullptr || outOfficialPoseCandidatesLength < kRequiredPoseCandidateOutputLength ||
         !std::isfinite(fx) || !std::isfinite(fy) || !std::isfinite(cx) || !std::isfinite(cy) ||
-        !std::isfinite(tagSizeMeters) || fx <= 0.0f || fy <= 0.0f || tagSizeMeters <= 0.0f)
+        !std::isfinite(tagSizeMeters) || fx <= 0.0f || fy <= 0.0f || tagSizeMeters <= 0.0f ||
+        (distortionCoefficients != nullptr && distortionCoefficientsLength != 5))
     {
         return 0;
     }
@@ -784,7 +867,7 @@ JNIEXPORT int JNICALL DJI_DetectAprilTagPoseComparisonRgba32(
         rgbaBytes, width, height, outDetection, nullptr,
         outOpenCvPoseCandidates, outOpenCvPoseCandidatesLength,
         outOfficialPoseCandidates, outOfficialPoseCandidatesLength,
-        fx, fy, cx, cy, tagSizeMeters);
+        fx, fy, cx, cy, tagSizeMeters, distortionCoefficients, distortionCoefficientsLength);
 
     auto openCvCandidateCount = 0;
     for (int candidateIndex = 0; candidateIndex < kMaximumPoseCandidates; ++candidateIndex) {
