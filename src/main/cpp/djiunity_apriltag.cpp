@@ -203,7 +203,11 @@ void LogPoseCandidateDiagnostics(
     const cv::Mat& rotationMatrix,
     const cv::Mat& cameraMatrix,
     const cv::Mat& distortion,
+    int imageWidth,
+    int imageHeight,
     double tagSizeMeters,
+    const std::vector<cv::Point2d>& detectedCorners,
+    const std::vector<cv::Point2d>& reprojectedCorners,
     double rmsError,
     bool accepted)
 {
@@ -234,6 +238,38 @@ void LogPoseCandidateDiagnostics(
         candidateIndex,
         right.dot(down), right.dot(normal), down.dot(normal),
         cv::norm(right), cv::norm(down), cv::norm(normal), normal.dot(viewDirection));
+
+    // The detector, K and this reprojection all use the same unrotated RGBA
+    // conversion. This makes any corner-space mismatch visible without a
+    // Unity/display-coordinate transform in the middle.
+    const auto principalPointInBounds = cameraMatrix.at<double>(0, 2) >= 0.0 &&
+                                       cameraMatrix.at<double>(0, 2) <= static_cast<double>(imageWidth) &&
+                                       cameraMatrix.at<double>(1, 2) >= 0.0 &&
+                                       cameraMatrix.at<double>(1, 2) <= static_cast<double>(imageHeight);
+    APRILTAG_LOGI(
+        "Image-space reprojection candidate=%d coordinateFrame=detectorRGBA32 image=%dx%d K=(fx=%.3f,fy=%.3f,cx=%.3f,cy=%.3f) "
+        "detectedCornersAndProjectedCornersUseSamePixels=1 principalPointInBounds=%d distortion=zero",
+        candidateIndex, imageWidth, imageHeight,
+        cameraMatrix.at<double>(0, 0), cameraMatrix.at<double>(1, 1),
+        cameraMatrix.at<double>(0, 2), cameraMatrix.at<double>(1, 2),
+        principalPointInBounds ? 1 : 0);
+    if (detectedCorners.size() == reprojectedCorners.size()) {
+        auto maximumCornerError = 0.0;
+        for (size_t cornerIndex = 0; cornerIndex < detectedCorners.size(); ++cornerIndex) {
+            const auto delta = reprojectedCorners[cornerIndex] - detectedCorners[cornerIndex];
+            const auto error = cv::norm(delta);
+            maximumCornerError = std::max(maximumCornerError, error);
+            APRILTAG_LOGI(
+                "Image-space reprojection candidate=%d corner=%zu detected=(%.3f,%.3f) projected=(%.3f,%.3f) delta=(%.3f,%.3f) errorPx=%.4f",
+                candidateIndex, cornerIndex,
+                detectedCorners[cornerIndex].x, detectedCorners[cornerIndex].y,
+                reprojectedCorners[cornerIndex].x, reprojectedCorners[cornerIndex].y,
+                delta.x, delta.y, error);
+        }
+        APRILTAG_LOGI(
+            "Image-space reprojection candidate=%d rmsErrorPx=%.4f maximumCornerErrorPx=%.4f.",
+            candidateIndex, rmsError, maximumCornerError);
+    }
 
     const auto axisLength = tagSizeMeters * 0.5;
     const std::vector<cv::Point3d> axisPoints = {
@@ -375,7 +411,8 @@ int SolveAprilTagPoseCandidates(
                               (candidateCount + 1) * kPoseCandidateStride <= outPoseCandidatesLength;
         LogPoseCandidateDiagnostics(
             static_cast<int>(index), rotationVector, translationVector, rotationMatrix,
-            cameraMatrix, zeroDistortion, tagSizeMeters, rmsError, accepted);
+            cameraMatrix, zeroDistortion, imageWidth, imageHeight, tagSizeMeters,
+            imagePoints, reprojectedPoints, rmsError, accepted);
         if (!accepted)
             continue;
 
