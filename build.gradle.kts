@@ -37,10 +37,6 @@ android {
         }
     }
 
-    buildFeatures {
-        prefab = true
-    }
-
     externalNativeBuild {
         cmake {
             path("src/main/cpp/CMakeLists.txt")
@@ -144,9 +140,6 @@ tasks.withType<Zip>().configureEach {
 
 dependencies {
     compileOnly(files("libs/unity-classes.jar"))
-
-    // Prefab package used by the native bridge for the calibrated IPPE square PnP solver.
-    implementation("org.opencv:opencv:4.11.0")
 
     implementation(libs.dji.sdk.v5.aircraft)
     implementation(libs.dji.sdk.v5.networkimp)
