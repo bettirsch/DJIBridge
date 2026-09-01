@@ -252,10 +252,16 @@ object DjiBoardVisionBridge {
     private fun logCalibrationFrameOnce(image: Image) {
         if (frameDescriptorLogged) return
         frameDescriptorLogged = true
+        val aspect = image.width.toFloat() / image.height.toFloat()
         Log.i(
             TAG,
             "DJI_CALIBRATION_FRAME width=${image.width} height=${image.height} " +
                 "format=YUV_420_888_LUMA8 rotation=0 crop=NONE resize=NONE mirror=NONE yuvToRgb=NONE"
+        )
+        Log.i(
+            TAG,
+            "DJI_RUNTIME_FRAME width=${image.width} height=${image.height} aspect=$aspect rotation=0 " +
+                "crop=NONE resize=NONE mirror=NONE pixelFormat=YUV_420_888_LUMA8 detectorInput=RAW_LUMA_PLANE"
         )
     }
 
