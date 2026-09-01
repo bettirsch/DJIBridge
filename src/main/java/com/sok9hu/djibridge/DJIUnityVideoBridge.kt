@@ -70,6 +70,11 @@ object DJIUnityVideoBridge {
     @JvmStatic
     fun getLatestBoardVisionJson(): String = DjiBoardVisionBridge.getLatestResultJson()
 
+    /** Requests a bounded capture session of raw ImageReader detector frames. */
+    @JvmStatic
+    fun requestBoardCalibrationCapture(frameCount: Int): String =
+        DjiBoardVisionBridge.requestCalibrationCapture(frameCount)
+
     internal fun onSdkReadyChanged(source: String) {
         val pending = pendingSurface ?: run {
             Log.i(TAG, "SDK ready via $source, but no deferred surface is waiting")

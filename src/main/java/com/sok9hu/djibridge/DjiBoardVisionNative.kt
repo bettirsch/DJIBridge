@@ -14,6 +14,7 @@ internal object DjiBoardVisionNative {
         fy: Float,
         cx: Float,
         cy: Float,
+        distortionCoefficients: FloatArray,
         markerLayout: FloatArray
     ): FloatArray?
 

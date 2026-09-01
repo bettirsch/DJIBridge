@@ -13,6 +13,8 @@ import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.v5.manager.interfaces.ICameraStreamManager.ScaleType
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -38,6 +40,11 @@ object DjiBoardVisionBridge {
     private var attachedSurface: Surface? = null
     private var nextDetectionAtMs = 0L
     private var submittedFrames = 0L
+    private var nextCaptureAtMs = 0L
+    private var captureRemaining = 0
+    private var captureIndex = 0
+    private var captureDirectory: File? = null
+    private var frameDescriptorLogged = false
 
     private data class Configuration(
         val width: Int,
@@ -46,6 +53,7 @@ object DjiBoardVisionBridge {
         val fy: Float,
         val cx: Float,
         val cy: Float,
+        val distortionCoefficients: FloatArray,
         val markerLayout: FloatArray,
         val detectionIntervalMs: Long
     ) {
@@ -65,6 +73,7 @@ object DjiBoardVisionBridge {
         fy: Float,
         cx: Float,
         cy: Float,
+        distortionCoefficients: FloatArray,
         markerLayout: FloatArray,
         detectionIntervalMs: Int
     ) {
@@ -76,6 +85,7 @@ object DjiBoardVisionBridge {
             fy = fy,
             cx = cx,
             cy = cy,
+            distortionCoefficients = distortionCoefficients.copyOf(5),
             markerLayout = markerLayout.copyOf(),
             detectionIntervalMs = detectionIntervalMs.coerceAtLeast(50).toLong()
         )
@@ -83,7 +93,8 @@ object DjiBoardVisionBridge {
             configuration = next
             latestResultJson = ""
         }
-        Log.i(TAG, "DJI_BOARD_VISION_CONFIGURED frame=${width}x$height markers=${markerLayout.size / LAYOUT_STRIDE} calibrated=${next.hasUsableCalibration}")
+        val distortionDescription = next.distortionCoefficients.joinToString(prefix = "[", postfix = "]")
+        Log.i(TAG, "DJI_BOARD_VISION_CONFIGURED frame=${width}x$height markers=${markerLayout.size / LAYOUT_STRIDE} calibrated=${next.hasUsableCalibration} distortion=$distortionDescription")
     }
 
     @JvmStatic
@@ -115,7 +126,9 @@ object DjiBoardVisionBridge {
                 workerHandler = handler
                 attachedSurface = reader.surface
                 nextDetectionAtMs = 0L
+                nextCaptureAtMs = 0L
                 submittedFrames = 0L
+                frameDescriptorLogged = false
                 Log.i(TAG, "DJI_BOARD_CPU_FRAME_SOURCE_STARTED type=ImageReader format=YUV_420_888 frame=${config.width}x${config.height} calibrated=${config.hasUsableCalibration}")
                 return true
             } catch (error: Throwable) {
@@ -162,6 +175,29 @@ object DjiBoardVisionBridge {
     @JvmStatic
     fun getLatestResultJson(): String = latestResultJson
 
+    /** Saves raw luma PGM frames from the exact input passed to native detection. */
+    @JvmStatic
+    fun requestCalibrationCapture(frameCount: Int): String {
+        val application = DJIPlugin.applicationContextOrNull() ?: run {
+            Log.w(TAG, "DJI_CALIBRATION_CAPTURE_REJECTED reason=APPLICATION_CONTEXT_UNAVAILABLE")
+            return ""
+        }
+        val count = frameCount.coerceIn(1, 80)
+        val root = File(application.getExternalFilesDir("dji-calibration"), "session_${System.currentTimeMillis()}")
+        if (!root.mkdirs() && !root.isDirectory) {
+            Log.w(TAG, "DJI_CALIBRATION_CAPTURE_REJECTED reason=CREATE_DIRECTORY_FAILED path=${root.absolutePath}")
+            return ""
+        }
+        synchronized(lock) {
+            captureDirectory = root
+            captureRemaining = count
+            captureIndex = 0
+            nextCaptureAtMs = 0L
+        }
+        Log.i(TAG, "DJI_CALIBRATION_CAPTURE_REQUESTED frames=$count intervalMs=500 path=${root.absolutePath}")
+        return root.absolutePath
+    }
+
     private fun onImageAvailable(source: ImageReader) {
         val image = try {
             source.acquireLatestImage()
@@ -172,9 +208,11 @@ object DjiBoardVisionBridge {
         try {
             val config = configuration ?: return
             val now = SystemClock.elapsedRealtime()
+            val luma = copyLumaPlane(image)
+            logCalibrationFrameOnce(image)
+            captureCalibrationFrameIfRequested(luma, image.width, image.height, image.timestamp, now)
             if (now < nextDetectionAtMs || !processing.compareAndSet(false, true)) return
             nextDetectionAtMs = now + config.detectionIntervalMs
-            val luma = copyLumaPlane(image)
             submittedFrames++
             val raw = DjiBoardVisionNative.detectBoardLuma(
                 luma,
@@ -184,6 +222,7 @@ object DjiBoardVisionBridge {
                 config.fy,
                 config.cx,
                 config.cy,
+                config.distortionCoefficients,
                 config.markerLayout
             )
             latestResultJson = serializeResult(raw, image.width, image.height, image.timestamp, config.hasUsableCalibration)
@@ -210,6 +249,59 @@ object DjiBoardVisionBridge {
         return output
     }
 
+    private fun logCalibrationFrameOnce(image: Image) {
+        if (frameDescriptorLogged) return
+        frameDescriptorLogged = true
+        Log.i(
+            TAG,
+            "DJI_CALIBRATION_FRAME width=${image.width} height=${image.height} " +
+                "format=YUV_420_888_LUMA8 rotation=0 crop=NONE resize=NONE mirror=NONE yuvToRgb=NONE"
+        )
+    }
+
+    private fun captureCalibrationFrameIfRequested(
+        luma: ByteArray,
+        width: Int,
+        height: Int,
+        timestampNs: Long,
+        nowMs: Long
+    ) {
+        val directory: File
+        val index: Int
+        synchronized(lock) {
+            if (captureRemaining <= 0 || nowMs < nextCaptureAtMs) return
+            directory = captureDirectory ?: return
+            index = captureIndex++
+            captureRemaining--
+            nextCaptureAtMs = nowMs + 500L
+        }
+
+        try {
+            val imageFile = File(directory, "frame_%03d_%d.pgm".format(index, timestampNs))
+            FileOutputStream(imageFile).use { output ->
+                output.write("P5\\n$width $height\\n255\\n".toByteArray(Charsets.US_ASCII))
+                output.write(luma)
+            }
+            val manifest = JSONObject()
+                .put("file", imageFile.name)
+                .put("width", width)
+                .put("height", height)
+                .put("timestampNs", timestampNs)
+                .put("pixelFormat", "YUV_420_888_LUMA8")
+                .put("rotationDegrees", 0)
+                .put("crop", "NONE")
+                .put("resize", "NONE")
+                .put("mirror", "NONE")
+                .put("detectorInput", "RAW_LUMA_PLANE")
+            File(directory, "capture_manifest.jsonl").appendText(manifest.toString() + "\\n")
+            Log.i(TAG, "DJI_CALIBRATION_CAPTURE_SAVED index=$index remaining=$captureRemaining path=${imageFile.absolutePath}")
+            if (captureRemaining == 0)
+                Log.i(TAG, "DJI_CALIBRATION_CAPTURE_COMPLETE path=${directory.absolutePath}")
+        } catch (error: Throwable) {
+            Log.e(TAG, "DJI_CALIBRATION_CAPTURE_FAILED", error)
+        }
+    }
+
     private fun serializeResult(
         raw: FloatArray?,
         width: Int,
@@ -223,6 +315,7 @@ object DjiBoardVisionBridge {
         root.put("frameHeight", height)
         root.put("timestampNs", timestampNs)
         root.put("frameSequence", submittedFrames)
+        root.put("detectorFrameFormat", "YUV_420_888_LUMA8")
         root.put("calibrationUsable", calibrated)
         root.put("status", values.getOrElse(0) { 0f }.toInt())
         root.put("markerCount", values.getOrElse(1) { 0f }.toInt())

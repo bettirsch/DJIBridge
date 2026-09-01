@@ -31,6 +31,7 @@ struct Vec2 { double x; double y; };
 struct Vec3 { double x; double y; double z; };
 struct Quaternion { double x; double y; double z; double w; };
 struct RigidPose { Quaternion q; Vec3 t; };
+struct Distortion { double k1; double k2; double p1; double p2; double k3; };
 
 struct MarkerDefinition {
     int id;
@@ -121,10 +122,33 @@ Quaternion SmallAngleQuaternion(const Vec3& radians) {
     return {radians.x*scale, radians.y*scale, radians.z*scale, std::cos(half)};
 }
 
-bool Project(const RigidPose& cameraFromBoard, const Vec3& boardPoint, double fx, double fy, double cx, double cy, Vec2* output) {
+Vec2 DistortNormalized(const Vec2& undistorted, const Distortion& distortion) {
+    const double x = undistorted.x;
+    const double y = undistorted.y;
+    const double r2 = x*x + y*y;
+    const double radial = 1.0 + distortion.k1*r2 + distortion.k2*r2*r2 + distortion.k3*r2*r2*r2;
+    return {
+        x * radial + 2.0*distortion.p1*x*y + distortion.p2*(r2 + 2.0*x*x),
+        y * radial + distortion.p1*(r2 + 2.0*y*y) + 2.0*distortion.p2*x*y
+    };
+}
+
+Vec2 UndistortPixel(const Vec2& distortedPixel, double fx, double fy, double cx, double cy, const Distortion& distortion) {
+    const Vec2 observed{(distortedPixel.x - cx) / fx, (distortedPixel.y - cy) / fy};
+    Vec2 estimate = observed;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const Vec2 distortedEstimate = DistortNormalized(estimate, distortion);
+        estimate.x += observed.x - distortedEstimate.x;
+        estimate.y += observed.y - distortedEstimate.y;
+    }
+    return {fx * estimate.x + cx, fy * estimate.y + cy};
+}
+
+bool Project(const RigidPose& cameraFromBoard, const Vec3& boardPoint, double fx, double fy, double cx, double cy, const Distortion& distortion, Vec2* output) {
     const Vec3 cameraPoint = Add(Rotate(cameraFromBoard.q, boardPoint), cameraFromBoard.t);
     if (cameraPoint.z <= 1e-5) return false;
-    *output = {fx * cameraPoint.x / cameraPoint.z + cx, fy * cameraPoint.y / cameraPoint.z + cy};
+    const Vec2 normalized = DistortNormalized({cameraPoint.x / cameraPoint.z, cameraPoint.y / cameraPoint.z}, distortion);
+    *output = {fx * normalized.x + cx, fy * normalized.y + cy};
     return std::isfinite(output->x) && std::isfinite(output->y);
 }
 
@@ -170,7 +194,7 @@ bool SolveLinear6(double matrix[6][6], double vector[6], double output[6]) {
 
 bool RefineBoardPose(
     const std::vector<Correspondence>& correspondences,
-    double fx, double fy, double cx, double cy,
+    double fx, double fy, double cx, double cy, const Distortion& distortion,
     RigidPose* pose,
     double* rms,
     double* maximumResidual) {
@@ -180,14 +204,14 @@ bool RefineBoardPose(
         double gradient[6]{};
         for (const auto& observation : correspondences) {
             Vec2 projection{};
-            if (!Project(*pose, observation.boardPoint, fx, fy, cx, cy, &projection)) return false;
+            if (!Project(*pose, observation.boardPoint, fx, fy, cx, cy, distortion, &projection)) return false;
             const double residual[2] = {observation.imagePoint.x - projection.x, observation.imagePoint.y - projection.y};
             const double residualNorm = std::hypot(residual[0], residual[1]);
             const double huberWeight = residualNorm <= 4.0 ? 1.0 : 4.0 / residualNorm;
             double jacobian[2][6]{};
             for (int parameter = 0; parameter < 6; ++parameter) {
                 Vec2 shifted{};
-                if (!Project(PerturbCameraPose(*pose, parameter, kFiniteDifference), observation.boardPoint, fx, fy, cx, cy, &shifted)) return false;
+                if (!Project(PerturbCameraPose(*pose, parameter, kFiniteDifference), observation.boardPoint, fx, fy, cx, cy, distortion, &shifted)) return false;
                 jacobian[0][parameter] = -(shifted.x - projection.x) / kFiniteDifference;
                 jacobian[1][parameter] = -(shifted.y - projection.y) / kFiniteDifference;
             }
@@ -208,7 +232,7 @@ bool RefineBoardPose(
     *maximumResidual = 0.0;
     for (const auto& observation : correspondences) {
         Vec2 projection{};
-        if (!Project(*pose, observation.boardPoint, fx, fy, cx, cy, &projection)) return false;
+        if (!Project(*pose, observation.boardPoint, fx, fy, cx, cy, distortion, &projection)) return false;
         const double residual = std::hypot(observation.imagePoint.x-projection.x, observation.imagePoint.y-projection.y);
         squaredError += residual*residual;
         *maximumResidual = std::max(*maximumResidual, residual);
@@ -257,6 +281,19 @@ std::unordered_map<int, MarkerDefinition> ParseLayout(JNIEnv* env, jfloatArray l
     return definitions;
 }
 
+Distortion ParseDistortion(JNIEnv* env, jfloatArray distortionArray) {
+    Distortion distortion{};
+    if (!distortionArray) return distortion;
+    const jsize length = env->GetArrayLength(distortionArray);
+    if (length < 5) return distortion;
+    jfloat values[5]{};
+    env->GetFloatArrayRegion(distortionArray, 0, 5, values);
+    if (std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2]) && std::isfinite(values[3]) && std::isfinite(values[4])) {
+        distortion = {values[0], values[1], values[2], values[3], values[4]};
+    }
+    return distortion;
+}
+
 std::array<Vec3, 4> BoardMarkerCorners(const MarkerDefinition& marker) {
     const double half = marker.sizeMeters * 0.5;
     const std::array<Vec3, 4> markerCorners{{{-half, half, 0}, {half, half, 0}, {half, -half, 0}, {-half, -half, 0}}};
@@ -291,9 +328,11 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
     jfloat fy,
     jfloat cx,
     jfloat cy,
+    jfloatArray distortionArray,
     jfloatArray layoutArray) {
     if (!lumaArray || width <= 0 || height <= 0) return CreateEmptyResult(env);
     const auto layout = ParseLayout(env, layoutArray);
+    const Distortion distortion = ParseDistortion(env, distortionArray);
     if (layout.empty()) return CreateEmptyResult(env);
     const jsize lumaLength = env->GetArrayLength(lumaArray);
     if (lumaLength < width * height) return CreateEmptyResult(env);
@@ -328,7 +367,16 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
             correspondences.push_back({boardCorners[corner], observed.detectedCorners[corner]});
         }
         if (calibrationValid && !hasInitialPose) {
-            apriltag_detection_info_t info{detection, marker.sizeMeters, fx, fy, cx, cy};
+            // The official pose initializer accepts only K. Feed it corners
+            // undistorted into the same calibrated ImageReader pixel frame;
+            // the joint refinement below then reprojects into raw pixels.
+            apriltag_detection_t undistortedDetection = *detection;
+            for (int corner = 0; corner < 4; ++corner) {
+                const Vec2 point = UndistortPixel(observed.detectedCorners[corner], fx, fy, cx, cy, distortion);
+                undistortedDetection.p[corner][0] = point.x;
+                undistortedDetection.p[corner][1] = point.y;
+            }
+            apriltag_detection_info_t info{&undistortedDetection, marker.sizeMeters, fx, fy, cx, cy};
             apriltag_pose_t tagPose{};
             estimate_tag_pose(&info, &tagPose);
             if (tagPose.R && tagPose.t) {
@@ -345,12 +393,12 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
     RigidPose cameraFromBoard = initialCameraFromBoard;
     double rms = std::numeric_limits<double>::quiet_NaN();
     double maximumResidual = std::numeric_limits<double>::quiet_NaN();
-    const bool poseValid = calibrationValid && hasInitialPose && RefineBoardPose(correspondences, fx, fy, cx, cy, &cameraFromBoard, &rms, &maximumResidual);
+    const bool poseValid = calibrationValid && hasInitialPose && RefineBoardPose(correspondences, fx, fy, cx, cy, distortion, &cameraFromBoard, &rms, &maximumResidual);
     if (poseValid) {
         for (auto& marker : visible) {
             const auto definition = layout.find(marker.id);
             const auto boardCorners = BoardMarkerCorners(definition->second);
-            for (int corner = 0; corner < 4; ++corner) Project(cameraFromBoard, boardCorners[corner], fx, fy, cx, cy, &marker.projectedCorners[corner]);
+            for (int corner = 0; corner < 4; ++corner) Project(cameraFromBoard, boardCorners[corner], fx, fy, cx, cy, distortion, &marker.projectedCorners[corner]);
         }
     }
     apriltag_detections_destroy(detections);
