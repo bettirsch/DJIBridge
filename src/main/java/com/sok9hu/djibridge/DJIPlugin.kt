@@ -23,9 +23,11 @@ object DJIPlugin {
 
     @Volatile private var sdkRegistered = false
     @Volatile private var productConnected = false
+    @Volatile private var appContext: Context? = null
 
     @JvmStatic
     fun init(application: Application) {
+        appContext = application.applicationContext
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Log.i(TAG, "init() called off main thread; reposting to Android main thread")
             mainHandler.post { init(application) }
@@ -56,6 +58,8 @@ object DJIPlugin {
 
     internal fun describeState(): String =
         "initialized=$initialized registered=$sdkRegistered productConnected=$productConnected"
+
+    internal fun applicationContextOrNull(): Context? = appContext
 
     private fun attachObserversIfNeeded() {
         if (observersAttached) return

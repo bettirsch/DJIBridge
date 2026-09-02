@@ -58,6 +58,23 @@ object DJIUnityVideoBridge {
         updateDecoderSurface(surface, width, height, "startOrUpdate")
     }
 
+    /** Starts the independent ImageReader CPU branch used by board vision. */
+    @JvmStatic
+    fun startBoardVision(): Boolean = DjiBoardVisionBridge.start(cameraStreamManager())
+
+    @JvmStatic
+    fun stopBoardVision() {
+        DjiBoardVisionBridge.stop(cameraStreamManager())
+    }
+
+    @JvmStatic
+    fun getLatestBoardVisionJson(): String = DjiBoardVisionBridge.getLatestResultJson()
+
+    /** Requests a bounded capture session of raw ImageReader detector frames. */
+    @JvmStatic
+    fun requestBoardCalibrationCapture(frameCount: Int): String =
+        DjiBoardVisionBridge.requestCalibrationCapture(frameCount)
+
     internal fun onSdkReadyChanged(source: String) {
         val pending = pendingSurface ?: run {
             Log.i(TAG, "SDK ready via $source, but no deferred surface is waiting")
@@ -72,6 +89,7 @@ object DJIUnityVideoBridge {
     fun stopVideo() {
         Log.i(TAG, " - stopVideo called")
         pendingSurface = null
+        DjiBoardVisionBridge.stop(cameraStreamManager())
         controller.stop()
     }
 }
