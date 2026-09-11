@@ -27,6 +27,7 @@ object DjiBoardVisionBridge {
     private const val HEADER_LENGTH = 17
     private const val MARKER_OUTPUT_LENGTH = 18
     private const val LAYOUT_STRIDE = 9
+    private const val MAX_DETECTOR_FRAME_PIXELS = 16 * 1024 * 1024
 
     private val lock = Any()
     private val processing = AtomicBoolean(false)
@@ -58,7 +59,38 @@ object DjiBoardVisionBridge {
         val detectionIntervalMs: Long
     ) {
         val hasUsableCalibration: Boolean
-            get() = fx > 0f && fy > 0f && cx.isFinite() && cy.isFinite()
+            get() = width > 0 && height > 0 &&
+                fx.isFinite() && fy.isFinite() && fx > 0f && fy > 0f &&
+                cx.isFinite() && cy.isFinite() &&
+                distortionCoefficients.size == 5 && distortionCoefficients.all { it.isFinite() }
+
+        fun validateForFrame(frameWidth: Int, frameHeight: Int, lumaLength: Int): String? {
+            if (!hasUsableCalibration) return "CALIBRATION_INVALID"
+            if (width != frameWidth || height != frameHeight) {
+                return "FRAME_GEOMETRY_MISMATCH runtime=${frameWidth}x$frameHeight configured=${width}x$height"
+            }
+            val expectedLumaLength = frameWidth.toLong() * frameHeight.toLong()
+            if (expectedLumaLength <= 0L || expectedLumaLength > MAX_DETECTOR_FRAME_PIXELS) {
+                return "FRAME_PIXEL_COUNT_INVALID pixels=$expectedLumaLength"
+            }
+            if (lumaLength.toLong() != expectedLumaLength) {
+                return "LUMA_LENGTH_MISMATCH actual=$lumaLength expected=$expectedLumaLength"
+            }
+            if (markerLayout.isEmpty() || markerLayout.size % LAYOUT_STRIDE != 0) {
+                return "MARKER_LAYOUT_SIZE_INVALID length=${markerLayout.size}"
+            }
+            for (offset in markerLayout.indices step LAYOUT_STRIDE) {
+                val id = markerLayout[offset]
+                val sizeMeters = markerLayout[offset + 1]
+                if (!id.isFinite() || id != id.toInt().toFloat() || !sizeMeters.isFinite() || sizeMeters <= 0f) {
+                    return "MARKER_LAYOUT_ENTRY_INVALID offset=$offset"
+                }
+                for (index in offset + 2 until offset + LAYOUT_STRIDE) {
+                    if (!markerLayout[index].isFinite()) return "MARKER_LAYOUT_NONFINITE offset=$offset"
+                }
+            }
+            return null
+        }
     }
 
     /**
@@ -77,7 +109,6 @@ object DjiBoardVisionBridge {
         markerLayout: FloatArray,
         detectionIntervalMs: Int
     ) {
-        require(markerLayout.size % LAYOUT_STRIDE == 0) { "Marker layout must use $LAYOUT_STRIDE floats per marker" }
         val next = Configuration(
             width = width,
             height = height,
@@ -85,7 +116,7 @@ object DjiBoardVisionBridge {
             fy = fy,
             cx = cx,
             cy = cy,
-            distortionCoefficients = distortionCoefficients.copyOf(5),
+            distortionCoefficients = if (distortionCoefficients.size == 5) distortionCoefficients.copyOf() else FloatArray(0),
             markerLayout = markerLayout.copyOf(),
             detectionIntervalMs = detectionIntervalMs.coerceAtLeast(50).toLong()
         )
@@ -95,6 +126,9 @@ object DjiBoardVisionBridge {
         }
         val distortionDescription = next.distortionCoefficients.joinToString(prefix = "[", postfix = "]")
         Log.i(TAG, "DJI_BOARD_VISION_CONFIGURED frame=${width}x$height markers=${markerLayout.size / LAYOUT_STRIDE} calibrated=${next.hasUsableCalibration} distortion=$distortionDescription")
+        next.validateForFrame(width, height, width * height)?.let { reason ->
+            Log.w(TAG, "DJI_BOARD_VISION_CONFIG_REJECTED reason=$reason")
+        }
     }
 
     @JvmStatic
@@ -214,6 +248,13 @@ object DjiBoardVisionBridge {
             if (now < nextDetectionAtMs || !processing.compareAndSet(false, true)) return
             nextDetectionAtMs = now + config.detectionIntervalMs
             submittedFrames++
+            Log.i(TAG, "BOARD_STAGE_01_FRAME_RECEIVED sequence=$submittedFrames width=${image.width} height=${image.height} lumaBytes=${luma.size}")
+            val rejectionReason = config.validateForFrame(image.width, image.height, luma.size)
+            if (rejectionReason != null) {
+                publishRejectedFrame(image.width, image.height, image.timestamp, rejectionReason)
+                return
+            }
+
             val raw = DjiBoardVisionNative.detectBoardLuma(
                 luma,
                 image.width,
@@ -226,8 +267,10 @@ object DjiBoardVisionBridge {
                 config.markerLayout
             )
             latestResultJson = serializeResult(raw, image.width, image.height, image.timestamp, config.hasUsableCalibration)
+            Log.i(TAG, "BOARD_STAGE_09_RESULT_SENT_TO_UNITY sequence=$submittedFrames nativeResultLength=${raw?.size ?: 0}")
         } catch (error: Throwable) {
             Log.e(TAG, "DJI_BOARD_CPU_FRAME_PROCESSING_FAILED", error)
+            publishRejectedFrame(image.width, image.height, image.timestamp, "KOTLIN_EXCEPTION_${error.javaClass.simpleName}")
         } finally {
             processing.set(false)
             image.close()
@@ -315,7 +358,10 @@ object DjiBoardVisionBridge {
         timestampNs: Long,
         calibrated: Boolean
     ): String {
-        val values = raw ?: FloatArray(HEADER_LENGTH)
+        if (raw == null || raw.size < HEADER_LENGTH) {
+            return serializeRejectedFrame(width, height, timestampNs, "JNI_RESULT_MISSING_OR_SHORT length=${raw?.size ?: 0}")
+        }
+        val values = raw
         val root = JSONObject()
         root.put("frameWidth", width)
         root.put("frameHeight", height)
@@ -323,7 +369,9 @@ object DjiBoardVisionBridge {
         root.put("frameSequence", submittedFrames)
         root.put("detectorFrameFormat", "YUV_420_888_LUMA8")
         root.put("calibrationUsable", calibrated)
-        root.put("status", values.getOrElse(0) { 0f }.toInt())
+        val status = values.getOrElse(0) { 0f }.toInt()
+        root.put("status", status)
+        root.put("rejectionReason", if (status < 0) "NATIVE_FAILURE_CODE_${-status}" else "")
         root.put("markerCount", values.getOrElse(1) { 0f }.toInt())
         root.put("cornerCount", values.getOrElse(2) { 0f }.toInt())
         root.putFinite("reprojectionRms", values.getOrElse(3) { Float.NaN })
@@ -345,6 +393,31 @@ object DjiBoardVisionBridge {
         }
         root.put("markers", markers)
         return root.toString()
+    }
+
+    private fun publishRejectedFrame(width: Int, height: Int, timestampNs: Long, reason: String) {
+        Log.w(TAG, "DJI_BOARD_FRAME_REJECTED reason=$reason")
+        latestResultJson = serializeRejectedFrame(width, height, timestampNs, reason)
+    }
+
+    private fun serializeRejectedFrame(width: Int, height: Int, timestampNs: Long, reason: String): String {
+        return JSONObject()
+            .put("frameWidth", width)
+            .put("frameHeight", height)
+            .put("timestampNs", timestampNs)
+            .put("frameSequence", submittedFrames)
+            .put("detectorFrameFormat", "YUV_420_888_LUMA8")
+            .put("calibrationUsable", false)
+            .put("status", -1)
+            .put("rejectionReason", reason)
+            .put("markerCount", 0)
+            .put("cornerCount", 0)
+            .put("reprojectionRms", JSONObject.NULL)
+            .put("maxResidual", JSONObject.NULL)
+            .put("cameraFromBoardPosition", JSONArray())
+            .put("cameraFromBoardRotationMatrix", JSONArray())
+            .put("markers", JSONArray())
+            .toString()
     }
 
     private fun pointArray(values: FloatArray, start: Int): JSONArray {

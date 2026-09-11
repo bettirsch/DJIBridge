@@ -5,8 +5,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -17,7 +19,9 @@ extern "C" {
 #include "tagStandard41h12.h"
 }
 
+#define BOARD_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "DjiBoardVision", __VA_ARGS__)
 #define BOARD_LOGW(...) __android_log_print(ANDROID_LOG_WARN, "DjiBoardVision", __VA_ARGS__)
+#define BOARD_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "DjiBoardVision", __VA_ARGS__)
 
 namespace {
 constexpr int kLayoutStride = 9; // id, size, board position xyz, board rotation xyzw
@@ -26,6 +30,26 @@ constexpr int kMarkerOutputLength = 18; // id, margin, detected corners, project
 constexpr int kDetectorThreads = 2;
 constexpr double kFiniteDifference = 1e-5;
 constexpr int kMaxRefinementIterations = 20;
+constexpr int64_t kMaxFramePixels = 16 * 1024 * 1024;
+
+enum class FailureCode : int {
+    InvalidFrame = 1,
+    InvalidCalibration = 2,
+    InvalidDistortion = 3,
+    InvalidLayout = 4,
+    LumaLengthMismatch = 5,
+    DetectorUnavailable = 6,
+    DetectionUnavailable = 7,
+    NoMarkers = 8,
+    UnknownMarkerId = 9,
+    InvalidCorners = 10,
+    CorrespondenceMismatch = 11,
+    PoseInitializationFailed = 12,
+    PoseRefinementFailed = 13,
+    JniException = 14,
+    CppException = 15,
+    UnknownException = 16,
+};
 
 struct Vec2 { double x; double y; };
 struct Vec3 { double x; double y; double z; };
@@ -260,38 +284,96 @@ bool EnsureDetectorLocked() {
     return true;
 }
 
-std::unordered_map<int, MarkerDefinition> ParseLayout(JNIEnv* env, jfloatArray layoutArray) {
-    std::unordered_map<int, MarkerDefinition> definitions;
-    if (!layoutArray) return definitions;
+bool ParseLayout(JNIEnv* env, jfloatArray layoutArray, std::unordered_map<int, MarkerDefinition>* definitions, std::string* reason) {
+    definitions->clear();
+    if (!layoutArray) {
+        *reason = "LAYOUT_NULL";
+        return false;
+    }
     const jsize length = env->GetArrayLength(layoutArray);
-    if (length <= 0 || length % kLayoutStride != 0) return definitions;
+    if (env->ExceptionCheck()) {
+        *reason = "LAYOUT_LENGTH_JNI_EXCEPTION";
+        return false;
+    }
+    if (length <= 0 || length % kLayoutStride != 0) {
+        *reason = "LAYOUT_LENGTH_INVALID";
+        return false;
+    }
     jfloat* values = env->GetFloatArrayElements(layoutArray, nullptr);
-    if (!values) return definitions;
+    if (!values) {
+        *reason = "LAYOUT_ELEMENTS_UNAVAILABLE";
+        return false;
+    }
+    bool valid = true;
     for (int offset = 0; offset < length; offset += kLayoutStride) {
+        const double id = values[offset];
         const double size = values[offset + 1];
-        if (!std::isfinite(size) || size <= 0.0) continue;
+        if (!std::isfinite(id) || std::floor(id) != id || !std::isfinite(size) || size <= 0.0) {
+            *reason = "LAYOUT_ID_OR_SIZE_INVALID";
+            valid = false;
+            break;
+        }
+        for (int index = offset + 2; index < offset + kLayoutStride; ++index) {
+            if (!std::isfinite(values[index])) {
+                *reason = "LAYOUT_NONFINITE_VALUE";
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) break;
         MarkerDefinition definition{};
-        definition.id = static_cast<int>(values[offset]);
+        definition.id = static_cast<int>(id);
         definition.sizeMeters = size;
         definition.boardFromMarker.t = {values[offset+2], values[offset+3], values[offset+4]};
         definition.boardFromMarker.q = Normalize({values[offset+5], values[offset+6], values[offset+7], values[offset+8]});
-        definitions[definition.id] = definition;
+        if (definitions->find(definition.id) != definitions->end()) {
+            *reason = "LAYOUT_DUPLICATE_MARKER_ID";
+            valid = false;
+            break;
+        }
+        definitions->emplace(definition.id, definition);
     }
     env->ReleaseFloatArrayElements(layoutArray, values, JNI_ABORT);
-    return definitions;
+    if (env->ExceptionCheck()) {
+        *reason = "LAYOUT_RELEASE_JNI_EXCEPTION";
+        return false;
+    }
+    if (!valid || definitions->empty()) {
+        if (reason->empty()) *reason = "LAYOUT_EMPTY";
+        return false;
+    }
+    return true;
 }
 
-Distortion ParseDistortion(JNIEnv* env, jfloatArray distortionArray) {
-    Distortion distortion{};
-    if (!distortionArray) return distortion;
+bool ParseDistortion(JNIEnv* env, jfloatArray distortionArray, Distortion* distortion, std::string* reason) {
+    *distortion = {};
+    if (!distortionArray) {
+        *reason = "DISTORTION_NULL";
+        return false;
+    }
     const jsize length = env->GetArrayLength(distortionArray);
-    if (length < 5) return distortion;
+    if (env->ExceptionCheck()) {
+        *reason = "DISTORTION_LENGTH_JNI_EXCEPTION";
+        return false;
+    }
+    if (length != 5) {
+        *reason = "DISTORTION_LENGTH_INVALID";
+        return false;
+    }
     jfloat values[5]{};
     env->GetFloatArrayRegion(distortionArray, 0, 5, values);
-    if (std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2]) && std::isfinite(values[3]) && std::isfinite(values[4])) {
-        distortion = {values[0], values[1], values[2], values[3], values[4]};
+    if (env->ExceptionCheck()) {
+        *reason = "DISTORTION_READ_JNI_EXCEPTION";
+        return false;
     }
-    return distortion;
+    for (const float value : values) {
+        if (!std::isfinite(value)) {
+            *reason = "DISTORTION_NONFINITE_VALUE";
+            return false;
+        }
+    }
+    *distortion = {values[0], values[1], values[2], values[3], values[4]};
+    return true;
 }
 
 std::array<Vec3, 4> BoardMarkerCorners(const MarkerDefinition& marker) {
@@ -307,20 +389,20 @@ RigidPose PoseFromOfficialTagPose(const apriltag_pose_t& pose) {
     return {QuaternionFromRotationMatrix(pose.R), {MATD_EL(pose.t,0,0), MATD_EL(pose.t,1,0), MATD_EL(pose.t,2,0)}};
 }
 
-jfloatArray CreateEmptyResult(JNIEnv* env) {
+jfloatArray CreateFailureResult(JNIEnv* env, FailureCode code, const char* reason) {
+    BOARD_LOGW("DJI_BOARD_FRAME_REJECTED reason=%s code=%d", reason, static_cast<int>(code));
     jfloatArray result = env->NewFloatArray(kHeaderLength);
     if (!result) return nullptr;
     std::array<jfloat, kHeaderLength> values{};
-    values[0] = 0.0f;
+    values[0] = -static_cast<jfloat>(code);
     env->SetFloatArrayRegion(result, 0, kHeaderLength, values.data());
     return result;
 }
 } // namespace
 
-extern "C" JNIEXPORT jfloatArray JNICALL
-Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
+namespace {
+jfloatArray DetectBoardLuma(
     JNIEnv* env,
-    jclass,
     jbyteArray lumaArray,
     jint width,
     jint height,
@@ -330,33 +412,71 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
     jfloat cy,
     jfloatArray distortionArray,
     jfloatArray layoutArray) {
-    if (!lumaArray || width <= 0 || height <= 0) return CreateEmptyResult(env);
-    const auto layout = ParseLayout(env, layoutArray);
-    const Distortion distortion = ParseDistortion(env, distortionArray);
-    if (layout.empty()) return CreateEmptyResult(env);
+    const int64_t pixelCount = static_cast<int64_t>(width) * static_cast<int64_t>(height);
+    if (!lumaArray || width <= 0 || height <= 0 || pixelCount <= 0 || pixelCount > kMaxFramePixels)
+        return CreateFailureResult(env, FailureCode::InvalidFrame, "FRAME_DIMENSIONS_INVALID");
+
+    std::unordered_map<int, MarkerDefinition> layout;
+    std::string layoutReason;
+    if (!ParseLayout(env, layoutArray, &layout, &layoutReason))
+        return CreateFailureResult(env, FailureCode::InvalidLayout, layoutReason.c_str());
+
+    Distortion distortion{};
+    std::string distortionReason;
+    if (!ParseDistortion(env, distortionArray, &distortion, &distortionReason))
+        return CreateFailureResult(env, FailureCode::InvalidDistortion, distortionReason.c_str());
+
+    const bool calibrationValid = std::isfinite(fx) && std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) && fx > 0.0f && fy > 0.0f;
+    if (!calibrationValid)
+        return CreateFailureResult(env, FailureCode::InvalidCalibration, "CAMERA_INTRINSICS_INVALID");
+
     const jsize lumaLength = env->GetArrayLength(lumaArray);
-    if (lumaLength < width * height) return CreateEmptyResult(env);
+    if (env->ExceptionCheck())
+        return CreateFailureResult(env, FailureCode::JniException, "LUMA_LENGTH_JNI_EXCEPTION");
+    if (static_cast<int64_t>(lumaLength) != pixelCount)
+        return CreateFailureResult(env, FailureCode::LumaLengthMismatch, "LUMA_LENGTH_MISMATCH");
+
+    BOARD_LOGI("BOARD_STAGE_01_FRAME_RECEIVED width=%d height=%d lumaBytes=%d", width, height, lumaLength);
 
     std::lock_guard<std::mutex> lock(g_detectorMutex);
-    if (!EnsureDetectorLocked()) return CreateEmptyResult(env);
-    g_luma.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
-    env->GetByteArrayRegion(lumaArray, 0, width * height, reinterpret_cast<jbyte*>(g_luma.data()));
+    if (!EnsureDetectorLocked())
+        return CreateFailureResult(env, FailureCode::DetectorUnavailable, "APRILTAG_DETECTOR_UNAVAILABLE");
+    g_luma.resize(static_cast<size_t>(pixelCount));
+    env->GetByteArrayRegion(lumaArray, 0, static_cast<jsize>(pixelCount), reinterpret_cast<jbyte*>(g_luma.data()));
+    if (env->ExceptionCheck())
+        return CreateFailureResult(env, FailureCode::JniException, "LUMA_COPY_JNI_EXCEPTION");
     image_u8_t image{width, height, width, g_luma.data()};
     zarray_t* detections = apriltag_detector_detect(g_detector, &image);
-    if (!detections) return CreateEmptyResult(env);
+    if (!detections)
+        return CreateFailureResult(env, FailureCode::DetectionUnavailable, "APRILTAG_DETECTION_UNAVAILABLE");
 
     std::vector<Correspondence> correspondences;
     std::vector<VisibleMarker> visible;
     RigidPose initialCameraFromBoard{{0,0,0,1},{0,0,0}};
     bool hasInitialPose = false;
-    const bool calibrationValid = std::isfinite(fx) && std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) && fx > 0.0f && fy > 0.0f;
+    apriltag_detection_t* initialDetection = nullptr;
+    const MarkerDefinition* initialMarker = nullptr;
     const int count = zarray_size(detections);
+    BOARD_LOGI("BOARD_STAGE_02_TAG_DETECTION_COMPLETE markerCount=%d", count);
+    if (count <= 0) {
+        apriltag_detections_destroy(detections);
+        return CreateFailureResult(env, FailureCode::NoMarkers, "MARKER_COUNT_ZERO");
+    }
+
+    int unknownMarkerCount = 0;
     for (int index = 0; index < count; ++index) {
         apriltag_detection_t* detection = nullptr;
         zarray_get(detections, index, &detection);
-        if (!detection) continue;
+        if (!detection) {
+            apriltag_detections_destroy(detections);
+            return CreateFailureResult(env, FailureCode::DetectionUnavailable, "NULL_APRILTAG_DETECTION");
+        }
         const auto definitionIt = layout.find(detection->id);
-        if (definitionIt == layout.end()) continue;
+        if (definitionIt == layout.end()) {
+            unknownMarkerCount++;
+            BOARD_LOGW("DJI_BOARD_MARKER_ID_REJECTED id=%d reason=NOT_IN_REFERENCE_BOARD_DEFINITION", detection->id);
+            continue;
+        }
         const MarkerDefinition& marker = definitionIt->second;
         VisibleMarker observed{};
         observed.id = marker.id;
@@ -364,36 +484,71 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
         const auto boardCorners = BoardMarkerCorners(marker);
         for (int corner = 0; corner < 4; ++corner) {
             observed.detectedCorners[corner] = {detection->p[corner][0], detection->p[corner][1]};
+            if (!std::isfinite(observed.detectedCorners[corner].x) || !std::isfinite(observed.detectedCorners[corner].y)) {
+                apriltag_detections_destroy(detections);
+                return CreateFailureResult(env, FailureCode::InvalidCorners, "DETECTED_CORNER_NONFINITE");
+            }
             correspondences.push_back({boardCorners[corner], observed.detectedCorners[corner]});
         }
-        if (calibrationValid && !hasInitialPose) {
-            // The official pose initializer accepts only K. Feed it corners
-            // undistorted into the same calibrated ImageReader pixel frame;
-            // the joint refinement below then reprojects into raw pixels.
-            apriltag_detection_t undistortedDetection = *detection;
-            for (int corner = 0; corner < 4; ++corner) {
-                const Vec2 point = UndistortPixel(observed.detectedCorners[corner], fx, fy, cx, cy, distortion);
-                undistortedDetection.p[corner][0] = point.x;
-                undistortedDetection.p[corner][1] = point.y;
-            }
-            apriltag_detection_info_t info{&undistortedDetection, marker.sizeMeters, fx, fy, cx, cy};
-            apriltag_pose_t tagPose{};
-            estimate_tag_pose(&info, &tagPose);
-            if (tagPose.R && tagPose.t) {
-                // T_camera_board = T_camera_marker * T_marker_board.
-                initialCameraFromBoard = Compose(PoseFromOfficialTagPose(tagPose), Invert(marker.boardFromMarker));
-                hasInitialPose = true;
-            }
-            if (tagPose.R) matd_destroy(tagPose.R);
-            if (tagPose.t) matd_destroy(tagPose.t);
+        if (!initialDetection) {
+            initialDetection = detection;
+            initialMarker = &marker;
         }
         visible.push_back(observed);
+    }
+
+    BOARD_LOGI("BOARD_STAGE_03_MARKER_IDS_VALIDATED detected=%d configured=%d unknown=%d", count, static_cast<int>(visible.size()), unknownMarkerCount);
+    if (unknownMarkerCount > 0 || visible.empty()) {
+        apriltag_detections_destroy(detections);
+        return CreateFailureResult(env, FailureCode::UnknownMarkerId, "MARKER_ID_NOT_IN_REFERENCE_BOARD_DEFINITION");
+    }
+
+    const size_t objectPointCount = correspondences.size();
+    const size_t imagePointCount = correspondences.size();
+    BOARD_LOGI("BOARD_STAGE_04_CORRESPONDENCES_BUILT objectPoints=%zu imagePoints=%zu", objectPointCount, imagePointCount);
+    if (objectPointCount != imagePointCount || objectPointCount < 4 || objectPointCount % 4 != 0) {
+        apriltag_detections_destroy(detections);
+        return CreateFailureResult(env, FailureCode::CorrespondenceMismatch, "CORRESPONDENCE_COUNT_INVALID");
+    }
+
+    BOARD_LOGI("BOARD_STAGE_05_CALIBRATION_VALIDATED fx=%.4f fy=%.4f cx=%.4f cy=%.4f distortion=[%.6f,%.6f,%.6f,%.6f,%.6f]", fx, fy, cx, cy, distortion.k1, distortion.k2, distortion.p1, distortion.p2, distortion.k3);
+
+    // The official pose initializer accepts only K. Feed it corners undistorted
+    // into the same calibrated ImageReader pixel frame before joint refinement.
+    if (initialDetection && initialMarker) {
+        apriltag_detection_t undistortedDetection = *initialDetection;
+        for (int corner = 0; corner < 4; ++corner) {
+            const Vec2 point = UndistortPixel({initialDetection->p[corner][0], initialDetection->p[corner][1]}, fx, fy, cx, cy, distortion);
+            undistortedDetection.p[corner][0] = point.x;
+            undistortedDetection.p[corner][1] = point.y;
+        }
+        apriltag_detection_info_t info{&undistortedDetection, initialMarker->sizeMeters, fx, fy, cx, cy};
+        apriltag_pose_t tagPose{};
+        const double tagPoseError = estimate_tag_pose(&info, &tagPose);
+        if (tagPose.R && tagPose.t) {
+            // T_camera_board = T_camera_marker * T_marker_board.
+            initialCameraFromBoard = Compose(PoseFromOfficialTagPose(tagPose), Invert(initialMarker->boardFromMarker));
+            hasInitialPose = true;
+            BOARD_LOGI("DJI_BOARD_INITIAL_TAG_POSE error=%.6f markerId=%d", tagPoseError, initialMarker->id);
+        }
+        if (tagPose.R) matd_destroy(tagPose.R);
+        if (tagPose.t) matd_destroy(tagPose.t);
     }
 
     RigidPose cameraFromBoard = initialCameraFromBoard;
     double rms = std::numeric_limits<double>::quiet_NaN();
     double maximumResidual = std::numeric_limits<double>::quiet_NaN();
-    const bool poseValid = calibrationValid && hasInitialPose && RefineBoardPose(correspondences, fx, fy, cx, cy, distortion, &cameraFromBoard, &rms, &maximumResidual);
+    BOARD_LOGI("BOARD_STAGE_06_PNP_BEGIN correspondences=%zu hasInitialPose=%d", correspondences.size(), hasInitialPose ? 1 : 0);
+    if (!hasInitialPose) {
+        apriltag_detections_destroy(detections);
+        return CreateFailureResult(env, FailureCode::PoseInitializationFailed, "OFFICIAL_APRILTAG_POSE_INITIALIZATION_FAILED");
+    }
+    const bool poseValid = RefineBoardPose(correspondences, fx, fy, cx, cy, distortion, &cameraFromBoard, &rms, &maximumResidual);
+    if (!poseValid || !std::isfinite(rms) || !std::isfinite(maximumResidual)) {
+        apriltag_detections_destroy(detections);
+        return CreateFailureResult(env, FailureCode::PoseRefinementFailed, "BOARD_POSE_REFINEMENT_FAILED");
+    }
+    BOARD_LOGI("BOARD_STAGE_07_PNP_SUCCESS position=[%.5f,%.5f,%.5f] rms=%.4f", cameraFromBoard.t.x, cameraFromBoard.t.y, cameraFromBoard.t.z, rms);
     if (poseValid) {
         for (auto& marker : visible) {
             const auto definition = layout.find(marker.id);
@@ -401,6 +556,7 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
             for (int corner = 0; corner < 4; ++corner) Project(cameraFromBoard, boardCorners[corner], fx, fy, cx, cy, distortion, &marker.projectedCorners[corner]);
         }
     }
+    BOARD_LOGI("BOARD_STAGE_08_REPROJECTION_COMPLETE rms=%.4f maxResidual=%.4f", rms, maximumResidual);
     apriltag_detections_destroy(detections);
 
     const int length = kHeaderLength + static_cast<int>(visible.size()) * kMarkerOutputLength;
@@ -428,6 +584,31 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
     }
     env->SetFloatArrayRegion(result, 0, length, output.data());
     return result;
+}
+} // namespace
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
+    JNIEnv* env,
+    jclass,
+    jbyteArray lumaArray,
+    jint width,
+    jint height,
+    jfloat fx,
+    jfloat fy,
+    jfloat cx,
+    jfloat cy,
+    jfloatArray distortionArray,
+    jfloatArray layoutArray) {
+    try {
+        return DetectBoardLuma(env, lumaArray, width, height, fx, fy, cx, cy, distortionArray, layoutArray);
+    } catch (const std::exception& error) {
+        BOARD_LOGE("DJI_BOARD_NATIVE_EXCEPTION type=std::exception message=%s", error.what());
+        return CreateFailureResult(env, FailureCode::CppException, "CPP_EXCEPTION");
+    } catch (...) {
+        BOARD_LOGE("DJI_BOARD_NATIVE_EXCEPTION type=unknown");
+        return CreateFailureResult(env, FailureCode::UnknownException, "UNKNOWN_CPP_EXCEPTION");
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
