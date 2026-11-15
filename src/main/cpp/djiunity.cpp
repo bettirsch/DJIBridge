@@ -2,6 +2,7 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <android/log.h>
+#include <atomic>
 #include <ctime>
 #include <cstdint>
 #include <cstring>
@@ -29,12 +30,26 @@ static float g_texTransform[16] = {
 static uint64_t g_updates = 0;
 static uint64_t g_prevUpdateMs = 0;
 static uint64_t g_lastHeartbeatMs = 0;
+// The managed SurfaceTexture callback records the closest app-observable OES
+// frame arrival. It is still not a DJI decoder PTS/source-frame identity.
+static std::atomic<uint64_t> g_lastOesFrameAvailableTimestampNs{0};
+static std::atomic<uint64_t> g_lastOesFrameAvailableSequence{0};
+// CLOCK_BOOTTIME matches Android's elapsedRealtimeNanos time base. This is
+// the moment the OES texture actually latches the newest displayed frame.
+static std::atomic<uint64_t> g_lastOesLatchTimestampNs{0};
+static std::atomic<uint64_t> g_lastOesLatchSequence{0};
 static constexpr bool kVerboseUpdateTexImageLogs = false;
 
 static uint64_t NowMs() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+static uint64_t NowElapsedRealtimeNs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 static bool GetEnvScoped(JNIEnv** outEnv) {
@@ -144,6 +159,10 @@ JNIEXPORT void JNICALL DJI_SetSurfaceTexture(void* stPtr) {
     g_updates = 0;
     g_prevUpdateMs = 0;
     g_lastHeartbeatMs = 0;
+    g_lastOesFrameAvailableTimestampNs.store(0, std::memory_order_release);
+    g_lastOesFrameAvailableSequence.store(0, std::memory_order_release);
+    g_lastOesLatchTimestampNs.store(0, std::memory_order_release);
+    g_lastOesLatchSequence.store(0, std::memory_order_release);
 
     LOGI("DJIBridgeNative - DJI_SetSurfaceTexture globalref=%p", g_surfaceTexture);
 
@@ -163,6 +182,10 @@ JNIEXPORT void JNICALL DJI_ClearSurfaceTexture() {
     g_updates = 0;
     g_prevUpdateMs = 0;
     g_lastHeartbeatMs = 0;
+    g_lastOesFrameAvailableTimestampNs.store(0, std::memory_order_release);
+    g_lastOesFrameAvailableSequence.store(0, std::memory_order_release);
+    g_lastOesLatchTimestampNs.store(0, std::memory_order_release);
+    g_lastOesLatchSequence.store(0, std::memory_order_release);
 
     LOGI("DJIBridgeNative - DJI_ClearSurfaceTexture done");
 
@@ -213,6 +236,9 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventID) {
             DetachIfNeeded(alreadyAttached);
             return;
         }
+
+        g_lastOesLatchTimestampNs.store(NowElapsedRealtimeNs(), std::memory_order_release);
+        g_lastOesLatchSequence.fetch_add(1, std::memory_order_acq_rel);
 
         if (g_getTransformMatrix) {
             jfloatArray matrixArray = env->NewFloatArray(16);
@@ -265,6 +291,22 @@ typedef void (UNITY_INTERFACE_API *RenderEventFunc)(int);
 
 JNIEXPORT RenderEventFunc JNICALL DJI_GetRenderEventFunc() { return OnRenderEvent; }
 JNIEXPORT int JNICALL DJI_GetTextureId() { return (int)g_texId; }
+JNIEXPORT void JNICALL DJI_RecordOesFrameAvailable() {
+    g_lastOesFrameAvailableTimestampNs.store(NowElapsedRealtimeNs(), std::memory_order_release);
+    g_lastOesFrameAvailableSequence.fetch_add(1, std::memory_order_acq_rel);
+}
+JNIEXPORT jlong JNICALL DJI_GetLastOesFrameAvailableTimestampNs() {
+    return (jlong)g_lastOesFrameAvailableTimestampNs.load(std::memory_order_acquire);
+}
+JNIEXPORT jlong JNICALL DJI_GetLastOesFrameAvailableSequence() {
+    return (jlong)g_lastOesFrameAvailableSequence.load(std::memory_order_acquire);
+}
+JNIEXPORT jlong JNICALL DJI_GetLastOesLatchTimestampNs() {
+    return (jlong)g_lastOesLatchTimestampNs.load(std::memory_order_acquire);
+}
+JNIEXPORT jlong JNICALL DJI_GetLastOesLatchSequence() {
+    return (jlong)g_lastOesLatchSequence.load(std::memory_order_acquire);
+}
 JNIEXPORT void JNICALL DJI_GetSurfaceTextureTransform(float* out16) {
     if (!out16) return;
     std::memcpy(out16, g_texTransform, sizeof(g_texTransform));

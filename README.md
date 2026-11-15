@@ -40,31 +40,13 @@ flowchart LR
 
 ## DJI API Key Setup
 
-Do not hardcode the DJI API key in source files.
+The AAR does not require or contain a DJI API key. Its Android manifest
+retains the `DJI_API_KEY` placeholder, resolved by the consuming Android
+application. For Unity, set `DJI_API_KEY` in the environment before starting
+the Editor, or in the local Gradle user properties. Never commit the key.
 
-The project reads the key from one of these locations:
-
-1. `DJIBridge/local.properties`
-2. Gradle property: `-PDJI_API_KEY=...`
-3. Environment variable: `DJI_API_KEY`
-
-Recommended local setup:
-
-1. Copy `local.properties.example` to `local.properties` if needed.
-2. Add your SDK path and DJI key there.
-
-Example:
-
-```properties
-sdk.dir=C\:\\Users\\you\\AppData\\Local\\Android\\Sdk
-DJI_API_KEY=your-dji-api-key
-```
-
-Important:
-
-- `local.properties` is gitignored
-- `local.properties.example` is safe to commit
-- the Android manifest receives the key through a Gradle manifest placeholder
+Copy `local.properties.example` to the ignored `local.properties` if you need
+to specify the SDK path for the bridge build.
 
 If the key was ever committed previously, treat it as exposed and rotate it in the DJI developer portal.
 

@@ -1,19 +1,7 @@
 import org.gradle.api.tasks.bundling.Zip
-import java.util.Properties
 
-val localProperties = Properties().apply {
-    val file = rootProject.file("local.properties")
-    if (file.exists()) {
-        file.inputStream().use(::load)
-    }
-}
-
-val djiApiKey = providers.gradleProperty("DJI_API_KEY").orNull
-    ?: System.getenv("DJI_API_KEY")
-    ?: localProperties.getProperty("DJI_API_KEY")
-    ?: throw GradleException(
-        "Missing DJI_API_KEY. Set it in DJIBridge/local.properties, pass -PDJI_API_KEY=..., or define the DJI_API_KEY environment variable."
-    )
+val fourTagMultiStartExperiment = providers.gradleProperty("DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT")
+    .map { it.toBooleanStrict() }.getOrElse(false)
 
 plugins {
     alias(libs.plugins.android.library)
@@ -28,12 +16,18 @@ android {
         minSdk = 24
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resourceConfigurations += listOf("en", "hu")
-        manifestPlaceholders["DJI_API_KEY"] = djiApiKey
+        // The consumer app resolves DJI_API_KEY when its manifest is merged.
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++17")
+                arguments("-DANDROID_STL=c++_shared")
+                arguments("-DDJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT=${if (fourTagMultiStartExperiment) "ON" else "OFF"}")
             }
         }
+    }
+
+    buildFeatures {
+        prefab = true
     }
 
     externalNativeBuild {
@@ -132,13 +126,16 @@ android {
  */
 tasks.withType<Zip>().configureEach {
     when (name) {
-        "bundleReleaseAar" -> archiveFileName.set("DJIUnityBridge.aar")
-        "bundleDebugAar" -> archiveFileName.set("DJIUnityBridge-debug.aar")
+        "bundleReleaseAar" -> archiveFileName.set(if (fourTagMultiStartExperiment) "DJIUnityBridge-four-tag-multistart-experiment.aar" else "DJIUnityBridge.aar")
+        "bundleDebugAar" -> archiveFileName.set(if (fourTagMultiStartExperiment) "DJIUnityBridge-four-tag-multistart-experiment-debug.aar" else "DJIUnityBridge-debug.aar")
     }
 }
 
 dependencies {
     compileOnly(files("libs/unity-classes.jar"))
+
+    // Prefab package used by the native bridge for the calibrated IPPE square PnP solver.
+    implementation("org.opencv:opencv:4.11.0")
 
     implementation(libs.dji.sdk.v5.aircraft)
     implementation(libs.dji.sdk.v5.networkimp)

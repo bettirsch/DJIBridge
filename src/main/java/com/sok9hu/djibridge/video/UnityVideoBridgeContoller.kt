@@ -30,6 +30,8 @@ class UnityVideoBridgeController(
 
     private val surfaceState = SurfaceState()
 
+    fun isStarted(): Boolean = synchronized(lock) { started }
+
     fun startOrUpdate(surface: Surface, width: Int, height: Int) {
         val mgr = streamManagerProvider() ?: run {
             Log.e(tag, "CameraStreamManager is null (DJI SDK not ready?)")
