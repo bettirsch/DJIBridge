@@ -105,11 +105,6 @@ object DJIUnityVideoBridge {
         return DjiBoardVisionBridge.getLatestResultJson()
     }
 
-    /** Requests a bounded capture session of raw detector-input frames. */
-    @JvmStatic
-    fun requestBoardCalibrationCapture(frameCount: Int): String =
-        DjiBoardVisionBridge.requestCalibrationCapture(frameCount)
-
     private fun logBoardVisionApiReadyOnce() {
         if (boardVisionApiReadyLogged) return
 

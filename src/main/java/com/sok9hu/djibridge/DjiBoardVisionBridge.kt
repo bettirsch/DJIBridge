@@ -269,12 +269,6 @@ object DjiBoardVisionBridge {
         Log.i(TAG, "DJI_EXACT_Y_CAPTURE_CAPABLE session=$sessionId armed=false root=$external")
     }
 
-    /** Explicit developer request; default-off capability and stronger bounded limits apply. */
-    @JvmStatic
-    fun requestCalibrationCapture(frameCount: Int): String {
-        return diagnosticCapture?.request(frameCount) ?: ""
-    }
-
     private fun onCameraFrame(
         frameData: ByteArray,
         offset: Int,

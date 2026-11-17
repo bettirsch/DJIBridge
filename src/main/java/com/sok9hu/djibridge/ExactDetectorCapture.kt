@@ -72,7 +72,6 @@ internal class ExactDetectorCapture(
     @Volatile private var nextOpportunity = 0L
     @Volatile private var stored = 0
     @Volatile private var consumedArm = false
-    @Volatile private var pendingRequest = 0
     private var directory: File? = null
     private var frameLimit = maxFrames
     private var bytesReserved = 0L
@@ -87,12 +86,6 @@ internal class ExactDetectorCapture(
     val invalidPackets = AtomicLong()
     val opportunities = AtomicLong()
     init { require(maxFrames in 1..16 && maxBytes in 1..64L * 1024 * 1024 && windowNs in 1..60_000_000_000L); worker.start() }
-
-    fun request(count: Int): String {
-        if (!enabled || consumedArm) return ""
-        pendingRequest = count.coerceIn(1, maxFrames)
-        return root.absolutePath
-    }
 
     // Called only by the existing single detector worker, never by the DJI callback.
     fun wantsFrame(nowNs: Long): Boolean {
@@ -133,8 +126,6 @@ internal class ExactDetectorCapture(
 
     private fun checkArm() {
         if (consumedArm) return
-        val requested = pendingRequest
-        if (requested > 0) { pendingRequest = 0; arm(requested, "IN_PROCESS_REQUEST"); return }
         val token = File(root, "arm.once")
         if (!token.isFile) return
         val consumed = File(root, "arm.consumed-${clock()}-${UUID.randomUUID()}")

@@ -1024,7 +1024,7 @@ jfloatArray DetectBoardLuma(
     });
 
     // The official pose initializer accepts only K. Feed it corners undistorted
-    // into the same calibrated ImageReader pixel frame before joint refinement.
+    // into the same detector pixel frame before joint refinement.
     if (initialDetection && initialMarker) {
         apriltag_detection_t undistortedDetection = *initialDetection;
         for (int corner = 0; corner < 4; ++corner) {
