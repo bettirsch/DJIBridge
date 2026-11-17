@@ -6,29 +6,15 @@ import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.v5.manager.interfaces.ICameraStreamManager
 import dji.v5.manager.interfaces.ICameraStreamManager.ScaleType
 
-/**
- * High-level orchestrator that connects the stream client, decode thread,
- * and decoding pipeline.
- */
+/** Manages the DJI SDK's direct camera stream Surface. */
 class UnityVideoBridgeController(
     private val tag: String,
     private val streamManagerProvider: () -> ICameraStreamManager?
 ) {
-    private companion object {
-        // Prefer DJI's direct Surface renderer. The byte-stream listener path can spin up an
-        // internal H.264 encoder on some devices, flooding logcat with MediaCodec -38 noise.
-        private const val USE_DIRECT_SURFACE_RENDERING = true
-    }
-
     private val lock = Any()
 
     private var started = false
     private var directSurface: Surface? = null
-    private var cameraClient: CameraStreamClient? = null
-    private var decodeExecutor: DecodeExecutor? = null
-    private var pipeline: DecoderPipeline? = null
-
-    private val surfaceState = SurfaceState()
 
     fun isStarted(): Boolean = synchronized(lock) { started }
 
@@ -39,39 +25,7 @@ class UnityVideoBridgeController(
         }
 
         synchronized(lock) {
-            surfaceState.update(surface, width, height)
-
-            if (USE_DIRECT_SURFACE_RENDERING) {
-                startOrUpdateDirectLocked(mgr, surface, width, height)
-                return
-            }
-
-            if (!started) {
-                started = true
-
-                decodeExecutor = DecodeExecutor(threadName = "DJIUnityVideoDecode")
-                pipeline = DecoderPipeline(tag, surfaceState)
-
-                cameraClient = CameraStreamClient(
-                    tag = tag,
-                    manager = mgr,
-                    component = ComponentIndexType.LEFT_OR_MAIN,
-                    onPacket = { pkt ->
-                        // Ensure all decoding happens on one thread.
-                        decodeExecutor?.post {
-                            pipeline?.onPacket(pkt)
-                        }
-                    }
-                ).also { it.start() }
-
-                Log.i(tag, "Started; waiting for stream...")
-                return
-            }
-
-            // Already started: try to switch codec output surface safely on decode thread.
-            decodeExecutor?.post {
-                pipeline?.onSurfacePossiblyChanged()
-            }
+            startOrUpdateDirectLocked(mgr, surface, width, height)
         }
     }
 
@@ -100,9 +54,6 @@ class UnityVideoBridgeController(
     }
 
     fun stop() {
-        val localClient: CameraStreamClient?
-        val localExec: DecodeExecutor?
-        val localPipe: DecoderPipeline?
         val localSurface: Surface?
 
         synchronized(lock) {
@@ -110,31 +61,10 @@ class UnityVideoBridgeController(
             started = false
 
             localSurface = directSurface
-            localClient = cameraClient
-            localExec = decodeExecutor
-            localPipe = pipeline
-
             directSurface = null
-            cameraClient = null
-            decodeExecutor = null
-            pipeline = null
-            surfaceState.clear()
         }
 
-        if (USE_DIRECT_SURFACE_RENDERING) {
-            removeDirectSurface(streamManagerProvider(), localSurface, "stop")
-            Log.i(tag, "Stopped")
-            return
-        }
-
-        // Stop receiving packets first (no more enqueues).
-        localClient?.stop()
-
-        // Drain/cleanup codec on decode thread then stop the thread.
-        localExec?.shutdownSafely {
-            localPipe?.release()
-        }
-
+        removeDirectSurface(streamManagerProvider(), localSurface, "stop")
         Log.i(tag, "Stopped")
     }
 
