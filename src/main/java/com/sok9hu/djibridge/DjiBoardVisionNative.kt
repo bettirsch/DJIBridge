@@ -19,6 +19,7 @@ internal object DjiBoardVisionNative {
     ): FloatArray?
 
     external fun releaseDetector()
+    external fun setDetailedLogging(enabled: Boolean)
     external fun setCaptureEvidenceEnabled(enabled: Boolean)
     external fun getCaptureEvidenceJson(): String?
     external fun isFourTagMultiStartExperimentEnabled(): Boolean

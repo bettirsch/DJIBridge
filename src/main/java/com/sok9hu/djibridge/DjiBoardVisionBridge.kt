@@ -28,6 +28,13 @@ object DjiBoardVisionBridge {
 
     private val lock = Any()
     private val processing = AtomicBoolean(false)
+    @Volatile private var detailedLogging = false
+
+    @JvmStatic
+    fun setDetailedLogging(enabled: Boolean) {
+        detailedLogging = enabled
+        DjiBoardVisionNative.setDetailedLogging(enabled)
+    }
 
     @Volatile private var latestResultJson = ""
     @Volatile private var configuration: Configuration? = null
@@ -291,7 +298,7 @@ object DjiBoardVisionBridge {
                     "sdkFrameTimestamp=NOT_EXPOSED"
             )
         }
-        val verbose = shouldLogFrameLifecycle(now)
+        val verbose = detailedLogging && shouldLogFrameLifecycle(now)
         if (verbose) {
             Log.i(TAG, "DJI_VISION_FRAME_CALLBACK generation=$callbackGeneration width=$width height=$height offset=$offset length=$length format=$format formatValue=${format.value} expectedLumaBytes=${width.toLong() * height.toLong()} thread=${Thread.currentThread().name}")
         }
@@ -386,7 +393,7 @@ object DjiBoardVisionBridge {
                 publishRejectedFrame(width, height, frameArrivalTimestampNs, "DETECTOR_WORKER_UNAVAILABLE")
                 return
             }
-            Log.i(
+            if (detailedLogging) Log.i(
                 TAG,
                 "DJI_VISION_FRAME_ACCEPTED sequence=$acceptedSequence generation=$callbackGeneration " +
                     "intervalMs=${config.detectionIntervalMs} acceptedCount=${acceptedFrames.get()} " +
@@ -415,9 +422,9 @@ object DjiBoardVisionBridge {
             }
             submittedFrames++
             processedSequence = submittedFrames
-            Log.i(TAG, "DJI_VISION_WORKER_BEGIN acceptedSequence=${frame.acceptedSequence} sequence=$processedSequence generation=${frame.listenerGeneration}")
+            if (detailedLogging) Log.i(TAG, "DJI_VISION_WORKER_BEGIN acceptedSequence=${frame.acceptedSequence} sequence=$processedSequence generation=${frame.listenerGeneration}")
             logCalibrationFrameOnce(frame)
-            Log.i(TAG, "BOARD_STAGE_01_FRAME_RECEIVED sequence=$processedSequence width=${frame.width} height=${frame.height} lumaBytes=${frame.luma.size} generation=${frame.listenerGeneration}")
+            if (detailedLogging) Log.i(TAG, "BOARD_STAGE_01_FRAME_RECEIVED sequence=$processedSequence width=${frame.width} height=${frame.height} lumaBytes=${frame.luma.size} generation=${frame.listenerGeneration}")
             val rejectionReason = config.validateForFrame(frame.width, frame.height, frame.luma.size)
             if (rejectionReason != null) {
                 publishRejectedFrame(frame.width, frame.height, frame.visionFrameTimestampNs, rejectionReason)
@@ -454,7 +461,7 @@ object DjiBoardVisionBridge {
             // AprilTag and board PnP run inside one native call. Its return is
             // therefore the first trustworthy timestamp for completed PnP.
             val pnpCompletedTimestampNs = detectorEndTimestampNs
-            if (processedSequence <= 3L || processedSequence % 10L == 0L) {
+            if (detailedLogging && (processedSequence <= 3L || processedSequence % 10L == 0L)) {
                 val queueDelayMs = (detectorStartTimestampNs - frame.visionFrameTimestampNs) / 1_000_000.0
                 val processingMs = (detectorEndTimestampNs - detectorStartTimestampNs) / 1_000_000.0
                 Log.i(
@@ -515,7 +522,7 @@ object DjiBoardVisionBridge {
                         frame.luma, detectorStartTimestampNs, detectorEndTimestampNs, resultJson, evidenceJson.toString(), categories))
                 } catch (error: Exception) { capture.errors.incrementAndGet(); Log.w(TAG, "DJI_EXACT_Y_PACKET_FAILED", error) }
             }
-            Log.i(TAG, "BOARD_STAGE_09_RESULT_SENT_TO_UNITY sequence=$processedSequence nativeResultLength=${raw?.size ?: 0}")
+            if (detailedLogging) Log.i(TAG, "BOARD_STAGE_09_RESULT_SENT_TO_UNITY sequence=$processedSequence nativeResultLength=${raw?.size ?: 0}")
         } catch (error: Throwable) {
             Log.e(TAG, "DJI_BOARD_OWNED_FRAME_PROCESSING_FAILED", error)
             publishRejectedFrame(
@@ -528,7 +535,7 @@ object DjiBoardVisionBridge {
             )
         } finally {
             processing.set(false)
-            Log.i(TAG, "DJI_VISION_WORKER_END acceptedSequence=${frame.acceptedSequence} sequence=$processedSequence")
+            if (detailedLogging) Log.i(TAG, "DJI_VISION_WORKER_END acceptedSequence=${frame.acceptedSequence} sequence=$processedSequence")
         }
     }
 

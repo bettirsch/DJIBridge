@@ -23,7 +23,7 @@ internal object DjiRawTelemetryCallbackLogger {
     private val queue = RawTelemetryCallbackQueue<RawCallbackRecord>(QUEUE_CAPACITY)
     private val positionIntervalsMs = ArrayDeque<Double>()
 
-    private var accepting = false
+    @Volatile private var accepting = false
     private var writerThread: Thread? = null
     private var positionWriter: BufferedWriter? = null
     private var velocityWriter: BufferedWriter? = null
@@ -89,16 +89,12 @@ internal object DjiRawTelemetryCallbackLogger {
             thread = writerThread
         }
 
-        // This runs from the Unity lifecycle, never from a DJI callback.
-        thread?.join(2_000L)
-        if (thread?.isAlive == true) {
-            Log.w(TAG, "DJI_POSITION_CALLBACK_LOG_ERROR reason=STOP_FLUSH_TIMEOUT")
-            return
-        }
+        // Calls are serialized on the Unity logging worker. Do not declare
+        // a session closed for retention while this worker still owns its files.
+        thread?.join()
 
         synchronized(stateLock) {
             writerThread = null
-            closeWriters()
             Log.i(
                 TAG,
                 "DJI_POSITION_CALLBACK_LOG_STOPPED sessionId=${sessionId ?: "UNAVAILABLE"} callbacks=$callbacks " +
@@ -120,7 +116,7 @@ internal object DjiRawTelemetryCallbackLogger {
         gpsSignalLevel: String?,
         satelliteCount: Int?
     ) {
-        if (timestampNs <= 0L) return
+        if (!accepting || timestampNs <= 0L) return
         enqueue(
             RawPositionRecord(
                 timestampNs, utcTimestampMs, latitude, longitude, altitude, gpsValid, gpsSignalLevel, satelliteCount
@@ -142,7 +138,7 @@ internal object DjiRawTelemetryCallbackLogger {
         eastMetersPerSecond: Double,
         downMetersPerSecond: Double
     ) {
-        if (timestampNs <= 0L) return
+        if (!accepting || timestampNs <= 0L) return
         enqueue(
             RawVelocityRecord(timestampNs, utcTimestampMs, northMetersPerSecond, eastMetersPerSecond, downMetersPerSecond)
         ) { }
@@ -184,7 +180,7 @@ internal object DjiRawTelemetryCallbackLogger {
                 Log.e(TAG, "DJI_POSITION_CALLBACK_LOG_ERROR reason=WRITE_FAILED message=${throwable.message}", throwable)
             }
         } finally {
-            synchronized(stateLock) { closeWriters() }
+            closeWriters()
         }
     }
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <chrono>
@@ -41,8 +42,9 @@ thread_local bool g_quietPoseRefinement = false;
 #define BOARD_LOGW(...) ((void)0)
 #define BOARD_LOGE(...) ((void)0)
 #else
-#define BOARD_LOGI(...) do { if (!g_quietPoseRefinement) __android_log_print(ANDROID_LOG_INFO, "DjiBoardVision", __VA_ARGS__); } while (0)
-#define BOARD_LOGW(...) do { if (!g_quietPoseRefinement) __android_log_print(ANDROID_LOG_WARN, "DjiBoardVision", __VA_ARGS__); } while (0)
+static std::atomic<bool> g_detailedLogging{false};
+#define BOARD_LOGI(...) do { if (g_detailedLogging.load(std::memory_order_relaxed) && !g_quietPoseRefinement) __android_log_print(ANDROID_LOG_INFO, "DjiBoardVision", __VA_ARGS__); } while (0)
+#define BOARD_LOGW(...) do { if (g_detailedLogging.load(std::memory_order_relaxed) && !g_quietPoseRefinement) __android_log_print(ANDROID_LOG_WARN, "DjiBoardVision", __VA_ARGS__); } while (0)
 #define BOARD_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "DjiBoardVision", __VA_ARGS__)
 #endif
 
@@ -1205,6 +1207,11 @@ Java_com_sok9hu_djibridge_DjiBoardVisionNative_detectBoardLuma(
         BOARD_LOGE("DJI_BOARD_NATIVE_EXCEPTION type=unknown");
         return CreateFailureResult(env, FailureCode::UnknownException, "UNKNOWN_CPP_EXCEPTION");
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_sok9hu_djibridge_DjiBoardVisionNative_setDetailedLogging(JNIEnv*, jclass, jboolean enabled) {
+    g_detailedLogging.store(enabled == JNI_TRUE, std::memory_order_relaxed);
 }
 
 extern "C" JNIEXPORT void JNICALL
