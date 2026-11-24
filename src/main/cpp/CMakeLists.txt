@@ -1,7 +1,13 @@
 cmake_minimum_required(VERSION 3.10.2)
 project(djiunity LANGUAGES C CXX)
 
-option(DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT "Isolated four-tag pose-selection experiment" OFF)
+option(DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT "Required four-tag multistart pose selection" ON)
+if(NOT DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT)
+    message(FATAL_ERROR "Shipping djiunity requires four-tag multistart ON. OFF is only supported by the standalone DJI_BOARD_POSE_REPLAY_TEST harness.")
+endif()
+if(DJI_BOARD_POSE_REPLAY_TEST)
+    message(FATAL_ERROR "DJI_BOARD_POSE_REPLAY_TEST is standalone-only and must not be used to build the Android bridge.")
+endif()
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)

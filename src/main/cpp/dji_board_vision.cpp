@@ -34,7 +34,13 @@ extern "C" {
 #endif
 
 #ifndef DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT
-#define DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT 0
+#define DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT 1
+#endif
+#if defined(DJI_BOARD_POSE_REPLAY_TEST) && DJI_BOARD_POSE_REPLAY_TEST != 1
+#error "The standalone replay harness requires explicit DJI_BOARD_POSE_REPLAY_TEST=1"
+#endif
+#if !DJI_APRILTAG_FOUR_TAG_MULTISTART_EXPERIMENT && !defined(DJI_BOARD_POSE_REPLAY_TEST)
+#error "Shipping djiunity requires four-tag multistart ON"
 #endif
 thread_local bool g_quietPoseRefinement = false;
 #ifdef DJI_BOARD_POSE_REPLAY_TEST
